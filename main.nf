@@ -15,8 +15,8 @@ workflow {
     if (params.analysis_mode != 'reference') {
         error "Ticket 01 implements reference alignment; '${params.analysis_mode}' mode is not available yet."
     }
-    if (!params.reference) {
-        error 'Reference-based analysis requires --reference.'
+    if (params.analysis_mode in ['reference', 'both'] && !params.reference) {
+        error "Analysis mode '${params.analysis_mode}' requires --reference."
     }
     if (!!params.fastq == !!params.bam) {
         error 'Provide exactly one of --fastq or --bam.'
@@ -99,7 +99,7 @@ workflow {
 
     ch_pretrimmed = ch_fastq
         .filter { meta, reads, report_data, n_filtered ->
-            if (n_filtered == 0 || n_filtered < params.min_n_reads) {
+            if (n_filtered.toInteger() == 0 || n_filtered.toInteger() < params.min_n_reads) {
                 log.warn "Discarding sample '${meta.alias}': ${n_filtered} reads remain after read filtering; minimum is ${params.min_n_reads}."
                 return false
             }
@@ -117,7 +117,7 @@ workflow {
 
     ch_usable_reads = ch_trimmed
         .filter { meta, reads, report_data, n_reads ->
-            if (n_reads < params.min_n_reads) {
+            if (n_reads.toInteger() < params.min_n_reads) {
                 log.warn "Discarding sample '${meta.alias}': ${n_reads} reads remain after trimming; minimum is ${params.min_n_reads}."
                 return false
             }
@@ -142,13 +142,35 @@ workflow {
 
     ch_report_dirs = ch_results.map { meta, bam, bai, report_data -> report_data }.collect()
     ch_target_for_report = ch_target
+    ch_versions = software_versions()
     make_alignment_report(
         ch_report_dirs,
         Channel.value(file(params.reference)),
         ch_target_for_report,
         ch_params,
-        software_versions()
+        ch_versions
     )
+
+    if (params.snp) {
+        ch_snp = ch_results
+            .combine(ch_reference)
+            .combine(ch_target)
+            .map { meta, bam, bai, report_data, ref, mmi, fai, target ->
+                [meta, bam, bai, ref, fai, target, report_data]
+            }
+        call_clair3(ch_snp)
+        if (params.phased) {
+            phase_snp(call_clair3.out.calls)
+            make_haplotype_consensus(phase_snp.out.consensus_inputs)
+        } else {
+            make_haplotype_consensus(call_clair3.out.calls)
+        }
+        make_snp_report(
+            params.phased ? phase_snp.out.report_dirs.collect() : call_clair3.out.report_dirs.collect(),
+            ch_params,
+            ch_versions
+        )
+    }
 }
 
 workflow.onComplete {
@@ -207,8 +229,7 @@ process filter_downsample {
         | gzip -c > filtered.fastq.gz
 
     N_FILTERED=\$(zcat filtered.fastq.gz | awk 'NR % 4 == 1 { n++ } END { print n+0 }')
-    if [ "$N_FILTERED" -gt 0 ]; then
-        mkdir -p filtered_histograms
+    if [ "\$N_FILTERED" -gt 0 ]; then
         fastcat --histograms filtered_histograms \
             -r >(bgzip -c > filtered-per-read-stats.tsv.gz) \
             filtered.fastq.gz > /dev/null
@@ -218,7 +239,7 @@ process filter_downsample {
         : > filtered-per-read-stats.tsv.gz
     fi
 
-    if [ "$n_reads" -gt 0 ] && [ "$N_FILTERED" -gt 0 ]; then
+    if [ "$n_reads" -gt 0 ] && [ "\$N_FILTERED" -gt 0 ]; then
         workflow-glue subset_reads filtered-per-read-stats.tsv.gz \
             ${params.drop_frac_longest_reads} "$n_reads" $take_longest_arg > selected-read-ids.txt
         seqkit grep -f selected-read-ids.txt filtered.fastq.gz \
@@ -408,11 +429,11 @@ process software_versions {
     script:
     """
     {
-        echo "minimap2,$(minimap2 --version | head -n 1)"
-        echo "samtools,$(samtools --version | head -n 1 | awk '{print $2}')"
-        echo "fastcat,$(fastcat --version 2>&1 | head -n 1)"
-        if command -v porechop >/dev/null 2>&1; then echo "porechop,$(porechop --version 2>&1 | head -n 1)"; fi
-        if command -v dorado >/dev/null 2>&1; then echo "dorado,$(dorado --version 2>&1 | head -n 1)"; fi
+        echo "minimap2,\$(minimap2 --version | head -n 1)"
+        echo "samtools,\$(samtools --version | head -n 1 | awk '{print \$2}')"
+        echo "fastcat,\$(fastcat --version 2>&1 | head -n 1)"
+        if command -v porechop >/dev/null 2>&1; then echo "porechop,\$(porechop --version 2>&1 | head -n 1)"; fi
+        if command -v dorado >/dev/null 2>&1; then echo "dorado,\$(dorado --version 2>&1 | head -n 1)"; fi
     } > versions.txt
     """
 }
@@ -440,6 +461,138 @@ process make_alignment_report {
         --downsampling-size ${params.reads_downsampling_size ?: 0} \
         --versions '$versions' \
         --params '$params_json' \
+        --wf-version '${workflow.manifest.version}'
+    """
+}
+
+process call_clair3 {
+    label 'wf_human_snp'
+    cpus 8
+    memory '16 GB'
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_snp.vcf.gz*'
+    input:
+        tuple val(meta), path(bam), path(bai), path(reference), path(reference_fai), path(target_bed), path(report_data)
+    output:
+        tuple val(meta), path("${meta.alias}"), emit: report_dirs
+        tuple val(meta), path(bam), path(reference), path(target_bed), path('clair3_out/merge_output.vcf.gz'), path('clair3_out/merge_output.vcf.gz.tbi'), path("${meta.alias}"), emit: calls
+    script:
+    def model = params.override_basecaller_cfg ?: params.clair3_model_path ?: ''
+    def extra = params.clair3_extra_args ?: ''
+    """
+    mkdir -p '${meta.alias}'
+    samtools faidx '$reference'
+    model='${model ?: ''}'
+    if [ -z "\$model" ] && [ -s '$report_data/post-trim-basecallers.tsv' ]; then
+        model=\$(awk 'NR==2 { print \$2; exit }' '$report_data/post-trim-basecallers.tsv' | sed -E 's/^dna_r10\\.4\\.1_e8\\.2_/r1041_e82_/; s/@v([0-9]+)\\.([0-9]+)\\.([0-9]+)/_v\\1\\2\\3/')
+    fi
+    model=\$(printf '%s' "\$model" | sed -E 's/^dna_r10\\.4\\.1_e8\\.2_/r1041_e82_/; s/^r10\\.4\\.1_e8\\.2_/r1041_e82_/; s/@v([0-9]+)\\.([0-9]+)\\.([0-9]+)/_v\\1\\2\\3/')
+    model="\${model:-r1041_e82_400bps_hac_v420}"
+    export CONDA_PREFIX=\$(dirname "\$(dirname "\$(which clair3.py)")")
+    find /opt -type d -name '*r1041*' 2>/dev/null | head -20 > available-models.txt
+    if [ -d "/opt/custflow/epi2meuser/models/\$model" ]; then model="/opt/custflow/epi2meuser/models/\$model"; fi
+    run_clair3.sh \\
+        --bam_fn='$bam' \\
+        --ref_fn='$reference' \\
+        --threads=$task.cpus \\
+        --platform='ont' \\
+        --model_path="\$model" \\
+        --bed_fn='$target_bed' \\
+        --output='clair3_out' \\
+        $extra
+    tabix -f -p vcf clair3_out/merge_output.vcf.gz
+    cp clair3_out/merge_output.vcf.gz '${meta.alias}/${meta.alias}.nf_snp.vcf.gz'
+    tabix -f -p vcf '${meta.alias}/${meta.alias}.nf_snp.vcf.gz'
+    bcftools query -f '%CHROM\\t%POS\\t%REF\\t%ALT\\t[%GT]\\t%FILTER\\n' '${meta.alias}/${meta.alias}.nf_snp.vcf.gz' \\
+        | awk 'BEGIN { OFS="\\t"; print "target","position","ref","alt","genotype","filter","type" } { t=(length(\$3)==1 && length(\$4)==1 ? "SNV" : "INDEL"); print \$1,\$2,\$3,\$4,\$5,\$6,t }' \\
+        > '${meta.alias}/variants.tsv'
+    """
+}
+
+process phase_snp {
+    label 'wf_human_snp'
+    cpus 4
+    memory '8 GB'
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_snp*'
+    publishDir "${params.out_dir}/${meta.alias}/alignments", mode: 'copy', pattern: '*.haplotagged.bam*'
+    input:
+        tuple val(meta), path(bam), path(reference), path(target_bed), path(vcf), path(vcf_index), path(report_dir, stageAs: 'clair3-report')
+    output:
+        tuple val(meta), path('phased.bam'), path('phased.vcf.gz'), path('phased.vcf.gz.tbi'), path(reference), path(target_bed), path(report_dir), emit: consensus_inputs
+        tuple val(meta), path("${meta.alias}"), emit: report_dirs
+    script:
+    """
+    samtools faidx '$reference'
+    samtools index '$bam'
+    whatshap phase --ignore-read-groups --reference '$reference' --output phased.vcf.gz '$vcf' '$bam'
+    tabix -f -p vcf phased.vcf.gz
+    whatshap haplotag --ignore-read-groups --reference '$reference' --output phased.bam phased.vcf.gz '$bam'
+    samtools index phased.bam
+    whatshap haplotagphase --ignore-read-groups --only-indels --reference '$reference' --output phased-with-indels.vcf phased.vcf.gz phased.bam
+    bgzip -c phased-with-indels.vcf > phased.vcf.gz
+    tabix -f -p vcf phased.vcf.gz
+    whatshap stats --gtf haploblocks.gtf phased.vcf.gz
+    cp phased.bam '${meta.alias}.haplotagged.bam'
+    cp phased.bam.bai '${meta.alias}.haplotagged.bam.bai'
+    cp phased.vcf.gz '${meta.alias}.nf_snp.vcf.gz'
+    cp phased.vcf.gz.tbi '${meta.alias}.nf_snp.vcf.gz.tbi'
+    cp haploblocks.gtf '${meta.alias}.nf_snp.haploblocks.gtf'
+    mkdir -p '${meta.alias}'
+    cp clair3-report/variants.tsv '${meta.alias}/variants.tsv'
+    """
+}
+
+process make_haplotype_consensus {
+    label 'wf_human_snp'
+    cpus 2
+    memory '4 GB'
+    publishDir "${params.out_dir}/${meta.alias}/consensus", mode: 'copy', pattern: '*.fasta'
+    input:
+        tuple val(meta), path(bam), path(reference), path(target_bed), path(vcf), path(vcf_index), path(report_dir)
+    output:
+        tuple val(meta), path('consensus')
+    script:
+    def phasedArg = params.phased ? 'true' : 'false'
+    """
+    mkdir -p consensus
+    samtools index '$bam'
+    while IFS=\$'\\t' read -r chrom start end target; do
+        [[ -z "$chrom" || "$chrom" == \\#* ]] && continue
+        target_ref="target.fa"
+        samtools faidx '$reference' "\$chrom:\$((start + 1))-\$end" > "\$target_ref"
+        samtools depth -aa -r "\$chrom:\$((start + 1))-\$end" '$bam' \
+            | awk -v c="\$chrom" -v s="\$start" -v cutoff=${params.min_coverage} 'BEGIN { OFS="\\t" } \$3 < cutoff { print c,\$2-s-1,\$2-s }' > low-depth.bed
+        bedtools maskfasta -fi "\$target_ref" -bed low-depth.bed -fo masked.fa
+        if [ '$phasedArg' = true ]; then
+            bcftools consensus -r "\$chrom:\$((start + 1))-\$end" -f masked.fa -H 1 '$vcf' \
+                > "consensus/${meta.alias}_\${target}_hap1.fasta"
+            bcftools consensus -r "\$chrom:\$((start + 1))-\$end" -f masked.fa -H 2 '$vcf' \
+                > "consensus/${meta.alias}_\${target}_hap2.fasta"
+        else
+            bcftools consensus --iupac-codes -r "\$chrom:\$((start + 1))-\$end" -f masked.fa '$vcf' \
+                > "consensus/${meta.alias}_\${target}.consensus.fasta"
+        fi
+    done < '$target_bed'
+    """
+}
+
+process make_snp_report {
+    label 'wf_common'
+    cpus 1
+    memory '4 GB'
+    publishDir params.out_dir, mode: 'copy', pattern: 'nf-amplicon-snp-report.html'
+    input:
+        path sample_reports
+        path params_json
+        path versions
+    output:
+        path 'nf-amplicon-snp-report.html'
+    script:
+    """
+    workflow-glue report_snp \\
+        --report-fname nf-amplicon-snp-report.html \\
+        --data . \\
+        --versions '$versions' \\
+        --params '$params_json' \\
         --wf-version '${workflow.manifest.version}'
     """
 }

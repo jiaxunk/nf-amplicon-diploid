@@ -2,107 +2,472 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/jiaxunk/nf-amplicon-diploid/main/nextflow_schema.json",
   "title": "nf-amplicon-diploid",
-  "description": "Diploid ONT amplicon analysis workflow. Ticket 01 implements reference alignment and preprocessing.",
+  "workflow_title": "Diploid Amplicon",
+  "description": "Diploid ONT amplicon analysis: reference-based variant calling and de novo haplotype-aware assembly.",
   "type": "object",
   "definitions": {
     "input_options": {
-      "title": "Input options",
+      "title": "Input Options",
       "type": "object",
+      "fa_icon": "fas fa-arrow-right",
+      "description": "Parameters for finding and handling input data for analysis.",
       "properties": {
-        "fastq": { "type": ["string", "null"], "format": "file-path", "exists": true, "description": "FASTQ file or directory; mutually exclusive with bam." },
-        "bam": { "type": ["string", "null"], "format": "file-path", "exists": true, "description": "BAM/uBAM file or directory; mutually exclusive with fastq." },
-        "sample": { "type": ["string", "null"], "description": "Name for a single input without a sample sheet." },
-        "sample_sheet": { "type": ["string", "null"], "format": "file-path", "exists": true, "description": "CSV file mapping barcodes to aliases and optional sample metadata." },
-        "reference": { "type": "string", "format": "file-path", "exists": true, "description": "Reference FASTA used for alignment." },
-        "target": { "type": ["string", "null"], "format": "file-path", "exists": true, "description": "Optional target BED. Each reference contig is used when omitted." },
-        "analyse_unclassified": { "type": "boolean", "default": false, "description": "Include reads from unclassified directories." },
-        "analyse_fail": { "type": "boolean", "default": false, "description": "Include reads from failed-read directories." }
-      }
+        "fastq": {
+          "type": "string",
+          "format": "path",
+          "title": "FASTQ",
+          "description": "FASTQ files to use in the analysis.",
+          "help_text": "This accepts one of four cases: (i) the path to a single FASTQ file; (ii) the path to a folder containing FASTQ files; (iii) the path to a folder containing one level of sub-folders which in turn contain FASTQ files; (iv) the path to a MinKNOW experiment folder containing sub-folders for each sequenced sample. In the first and second case, a sample name can be supplied with `--sample`. In the third case, the data is assumed to be multiplexed with the names of the sub-folders as barcodes, and a sample sheet can be provided with `--sample_sheet`. Mutually exclusive with `--bam`."
+        },
+        "bam": {
+          "type": "string",
+          "format": "path",
+          "title": "BAM / uBAM",
+          "description": "BAM or unaligned BAM (uBAM) files to use in the analysis.",
+          "help_text": "This accepts one of four cases: (i) the path to a single BAM file; (ii) the path to a folder containing BAM files; (iii) the path to a folder containing one level of sub-folders which in turn contain BAM files; (iv) the path to a MinKNOW experiment folder containing sub-folders for each sequenced sample. In the first and second case, a sample name can be supplied with `--sample`. In the third case, the data is assumed to be multiplexed with the names of the sub-folders as barcodes, and a sample sheet can be provided with `--sample_sheet`. Already-aligned BAMs matching the reference will skip remapping unless `--force_remap` is set. Mutually exclusive with `--fastq`."
+        },
+        "sample": {
+          "type": "string",
+          "title": "Sample name",
+          "description": "A single sample name for non-multiplexed data.",
+          "help_text": "Permissible when passing a single FASTQ/BAM file or a directory of such files. Not used when a sample sheet is provided."
+        },
+        "sample_sheet": {
+          "type": "string",
+          "format": "file-path",
+          "title": "Sample sheet",
+          "description": "A CSV file used to map barcodes to sample aliases.",
+          "help_text": "The sample sheet is a CSV file with, minimally, columns named `barcode` and `alias`. Extra columns are allowed. Provide when the input data is a barcoded directory tree."
+        },
+        "reference": {
+          "type": "string",
+          "format": "file-path",
+          "title": "Reference FASTA",
+          "description": "Reference FASTA file for alignment and variant calling.",
+          "help_text": "Required when `--analysis_mode` is `reference` or `both`. Optional when `--analysis_mode` is `denovo`. The file should contain the full reference sequence(s) for the targeted amplicon region(s)."
+        },
+        "target": {
+          "type": "string",
+          "format": "file-path",
+          "title": "Target regions BED",
+          "description": "Optional BED file defining target regions for depth and variant reporting.",
+          "help_text": "When omitted, coverage and variant statistics are computed over the full length of each reference contig. Provide a BED file to restrict reporting to specific amplicon coordinates."
+        },
+        "analyse_unclassified": {
+          "type": "boolean",
+          "default": false,
+          "title": "Analyse unclassified reads",
+          "description": "Analyse reads from unclassified directories.",
+          "help_text": "If selected and if the input is a multiplexed directory, the workflow will also process the `unclassified` directory."
+        },
+        "analyse_fail": {
+          "type": "boolean",
+          "default": false,
+          "title": "Analyse failed reads",
+          "description": "Analyse reads from failed-read directories.",
+          "help_text": "If selected, reads in `*_fail` subdirectories will be included in the analysis."
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["fastq"]
+        },
+        {
+          "required": ["bam"]
+        }
+      ]
     },
     "workflow_options": {
-      "title": "Workflow options",
+      "title": "Workflow Options",
       "type": "object",
+      "fa_icon": "fas fa-cogs",
+      "description": "High-level workflow behaviour and analysis mode selection.",
       "properties": {
-        "out_dir": { "type": "string", "format": "directory-path", "default": "output", "description": "Output directory." },
-        "analysis_mode": { "type": "string", "enum": ["reference", "denovo", "both"], "default": "reference", "description": "Analysis mode. Reference mode is implemented by ticket 01." },
-        "force_remap": { "type": "boolean", "default": false, "description": "Convert and remap BAM reads even when headers match the reference." },
-        "disable_ping": { "type": "boolean", "default": false, "description": "Disable workflow telemetry." },
-        "store_dir": { "type": ["string", "null"], "format": "directory-path", "description": "Reserved for workflow data caching." },
-        "combine_results": { "type": "boolean", "default": false, "description": "Reserved for combined analysis outputs." },
-        "igv": { "type": "boolean", "default": false, "description": "Enable IGV configuration output." }
+        "analysis_mode": {
+          "type": "string",
+          "enum": ["reference", "denovo", "both"],
+          "default": "reference",
+          "title": "Analysis mode",
+          "description": "Choose the analysis strategy for this run.",
+          "help_text": "`reference` — align reads to a reference FASTA and call variants (SNPs, SVs, phased consensus). `denovo` — perform haplotype-aware de novo assembly without a reference (reference FASTA is optional). `both` — run reference-based and de novo analyses in parallel (reference FASTA required)."
+        },
+        "out_dir": {
+          "type": "string",
+          "format": "directory-path",
+          "default": "output",
+          "title": "Output directory",
+          "description": "Directory where workflow results will be written.",
+          "help_text": "All output files, reports, and execution logs will be placed under this directory."
+        },
+        "force_remap": {
+          "type": "boolean",
+          "default": false,
+          "title": "Force remapping",
+          "description": "Remap already-aligned BAMs even when their headers match the reference.",
+          "help_text": "By default, BAM files whose headers indicate they were aligned to the supplied reference are passed directly to downstream steps. Enable this option to force FASTQ conversion and remapping regardless."
+        },
+        "disable_ping": {
+          "type": "boolean",
+          "default": false,
+          "title": "Disable telemetry ping",
+          "description": "Prevent the workflow from sending an anonymous usage ping.",
+          "help_text": "The workflow sends a single anonymous ping to Oxford Nanopore Technologies on startup. Enable this option to suppress it."
+        },
+        "combine_results": {
+          "type": "boolean",
+          "default": false,
+          "title": "Combine results",
+          "description": "Produce combined output files merging all samples.",
+          "help_text": "Reserved for future use. When enabled, an additional merged BAM and VCF will be published alongside per-sample outputs."
+        },
+        "igv": {
+          "type": "boolean",
+          "default": false,
+          "title": "IGV configuration",
+          "description": "Output an IGV session file for interactive visualisation.",
+          "help_text": "When enabled, a `igv.json` session file is published to the output directory, allowing results to be loaded directly into the Integrative Genomics Viewer."
+        },
+        "store_dir": {
+          "type": "string",
+          "format": "directory-path",
+          "title": "Store directory",
+          "description": "Directory for caching intermediate workflow data.",
+          "help_text": "Reserved for workflow-level caching of large reference indexes or downloaded models. Leave empty for normal runs.",
+          "hidden": true
+        }
       }
     },
     "preprocessing_options": {
-      "title": "Read filtering and trimming",
+      "title": "Pre-processing Options",
       "type": "object",
+      "fa_icon": "fas fa-filter",
+      "description": "Parameters for filtering, downsampling, and trimming reads before analysis.",
       "properties": {
-        "min_read_length": { "type": "integer", "default": 300, "minimum": 0, "description": "Minimum read length retained before downsampling." },
-        "max_read_length": { "type": ["integer", "null"], "minimum": 1, "description": "Optional maximum read length retained before downsampling." },
-        "min_read_qual": { "type": "number", "default": 10, "minimum": 0, "description": "Minimum mean read quality retained before downsampling." },
-        "reads_downsampling_size": { "type": "integer", "default": 2000, "minimum": 0, "description": "Maximum reads retained per sample after filtering; 0 disables downsampling." },
-        "drop_frac_longest_reads": { "type": "number", "default": 0.05, "minimum": 0, "maximum": 1, "description": "Fraction of longest reads excluded before length-mode-preserving subsetting." },
-        "take_longest_remaining_reads": { "type": "boolean", "default": true, "description": "Preserve distinct read-length modes when downsampling." },
-        "trimmer": { "type": "string", "enum": ["porechop", "dorado", "none"], "default": "porechop", "description": "Adapter/barcode trimming method." },
-        "trimmer_extra_args": { "type": ["string", "null"], "description": "Additional options passed to the selected trimmer." },
-        "min_n_reads": { "type": "integer", "default": 40, "minimum": 0, "description": "Minimum read count after trimming; samples below this value are omitted." }
+        "min_read_length": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 0,
+          "title": "Minimum read length",
+          "description": "Reads shorter than this value are discarded before downsampling.",
+          "help_text": "Reads below this length threshold are removed early in preprocessing. Increase if the amplicon is long and very short reads are likely to be artefacts."
+        },
+        "max_read_length": {
+          "type": "integer",
+          "title": "Maximum read length",
+          "description": "Reads longer than this value are discarded before downsampling.",
+          "help_text": "Optional upper length filter. Leave unset to retain all reads above `--min_read_length`. Useful to remove concatenated read artefacts when the expected amplicon size is well-defined."
+        },
+        "min_read_qual": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "title": "Minimum mean read quality",
+          "description": "Reads with a mean quality score below this value are discarded.",
+          "help_text": "Quality filtering is applied before downsampling. Increase to retain only higher-confidence reads; decrease if read depth is limiting."
+        },
+        "reads_downsampling_size": {
+          "type": "integer",
+          "default": 2000,
+          "minimum": 0,
+          "title": "Downsampling size",
+          "description": "Maximum number of reads retained per sample after filtering. Set to 0 to disable.",
+          "help_text": "Downsampling is performed after length and quality filtering. Setting this to 0 disables downsampling and uses all passing reads. Increasing this value improves sensitivity but may increase runtime and memory use."
+        },
+        "drop_frac_longest_reads": {
+          "type": "number",
+          "default": 0.05,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Drop longest reads fraction",
+          "description": "Fraction of the longest reads excluded before downsampling.",
+          "help_text": "The very longest reads can be concatemers or contain other artefacts. Excluding a small fraction simplifies de novo consensus generation. Set to 0.0 when working with multiple amplicons per sample in variant calling mode."
+        },
+        "take_longest_remaining_reads": {
+          "type": "boolean",
+          "default": true,
+          "title": "Take longest remaining reads",
+          "description": "Preferentially retain longer reads when downsampling.",
+          "help_text": "When enabled, the longest reads (after the `drop_frac_longest_reads` exclusion) are kept rather than randomly selected. Recommended for de novo mode and long amplicons. Disable when working with variant calling mode across multiple amplicons per sample."
+        },
+        "trimmer": {
+          "type": "string",
+          "enum": ["porechop", "dorado", "none"],
+          "default": "porechop",
+          "title": "Trimmer",
+          "description": "Adapter and barcode trimming method applied before alignment.",
+          "help_text": "`porechop` — trim adapters and barcodes with Porechop (recommended for most ONT libraries). `dorado` — use Dorado's built-in adapter trimmer. `none` — skip trimming entirely."
+        },
+        "trimmer_extra_args": {
+          "type": "string",
+          "title": "Trimmer extra arguments",
+          "description": "Additional command-line arguments passed to the selected trimmer.",
+          "help_text": "These arguments are appended verbatim to the trimmer command. Consult the trimmer documentation for available options."
+        },
+        "min_n_reads": {
+          "type": "integer",
+          "default": 40,
+          "minimum": 0,
+          "title": "Minimum number of reads",
+          "description": "Samples with fewer reads than this after trimming are excluded from analysis.",
+          "help_text": "Samples falling below this threshold are dropped with a warning. Reduce if working with low-input samples; increase to avoid unreliable results from very sparse coverage."
+        }
       }
     },
     "alignment_options": {
-      "title": "Reference alignment",
+      "title": "Reference Alignment Options",
       "type": "object",
+      "fa_icon": "fas fa-align-left",
+      "description": "Parameters controlling minimap2 alignment and coverage reporting (reference and both modes).",
       "properties": {
-        "minimap2_extra_args": { "type": ["string", "null"], "description": "Additional options passed to minimap2." },
-        "number_depth_windows": { "type": "integer", "default": 100, "minimum": 1 },
-        "min_coverage": { "type": "integer", "default": 20, "minimum": 0 },
-        "threads": { "type": "integer", "default": 4, "minimum": 1 }
+        "minimap2_extra_args": {
+          "type": "string",
+          "title": "minimap2 extra arguments",
+          "description": "Additional command-line arguments passed to minimap2.",
+          "help_text": "These arguments are appended verbatim to the minimap2 command. Useful for tuning alignment sensitivity or preset for unusual amplicon sizes."
+        },
+        "number_depth_windows": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "title": "Number of depth windows",
+          "description": "Number of windows used to compute per-amplicon depth profiles.",
+          "help_text": "Coverage is calculated across each amplicon split into this many windows. Higher values give finer-grained plots at the cost of slightly longer runtime."
+        },
+        "min_coverage": {
+          "type": "integer",
+          "default": 20,
+          "minimum": 0,
+          "title": "Minimum coverage",
+          "description": "Positions with fewer reads than this are masked in consensus sequences.",
+          "help_text": "Low-coverage positions are masked with Ns in the phased consensus output to avoid calling unreliable bases."
+        },
+        "threads": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "title": "CPU threads",
+          "description": "Maximum number of CPU threads to use per workflow task.",
+          "help_text": "Several tasks (minimap2, mosdepth, bamstats) benefit from multiple threads. Total CPU usage is also constrained by the Nextflow executor configuration."
+        }
       }
     },
     "variant_options": {
-      "title": "Variant calling options",
+      "title": "Variant Calling Options",
       "type": "object",
+      "fa_icon": "fas fa-dna",
+      "description": "Parameters for SNP calling, SV calling, phasing, and consensus generation (reference and both modes).",
       "properties": {
-        "snp": { "type": "boolean", "default": true },
-        "sv": { "type": "boolean", "default": true },
-        "phased": { "type": "boolean", "default": true },
-        "override_basecaller_cfg": { "type": ["string", "null"] },
-        "clair3_model_path": { "type": ["string", "null"], "format": "file-path" },
-        "clair3_extra_args": { "type": ["string", "null"] },
-        "min_sv_support": { "type": "integer", "default": 5, "minimum": 1 },
-        "min_sv_vaf": { "type": "number", "default": 0.1, "minimum": 0, "maximum": 1 },
-        "sniffles_extra_args": { "type": ["string", "null"] },
-        "cuban_repeats": { "type": ["string", "null"], "format": "file-path" },
-        "cuban_extra_args": { "type": ["string", "null"] }
+        "snp": {
+          "type": "boolean",
+          "default": true,
+          "title": "Call SNPs and small indels",
+          "description": "Run Clair3 SNP/indel calling on aligned reads.",
+          "help_text": "When enabled, Clair3 is used to call small variants within the target region(s). Requires `--analysis_mode` to be `reference` or `both`."
+        },
+        "sv": {
+          "type": "boolean",
+          "default": true,
+          "title": "Call structural variants",
+          "description": "Run Sniffles SV calling on aligned reads.",
+          "help_text": "When enabled, Sniffles is used to call structural variants (deletions, insertions, duplications, inversions) within the target region(s). Requires `--analysis_mode` to be `reference` or `both`."
+        },
+        "phased": {
+          "type": "boolean",
+          "default": true,
+          "title": "Phase variants",
+          "description": "Phase SNP calls and produce haplotype-resolved consensus sequences.",
+          "help_text": "When enabled, WhatsHap is used to phase Clair3 SNP calls and tag reads to haplotypes. Phased BAMs and haplotype-aware consensus FASTA files are published."
+        },
+        "override_basecaller_cfg": {
+          "type": "string",
+          "title": "Override basecaller model",
+          "description": "Override the auto-detected basecaller model used to select the Clair3 model.",
+          "help_text": "By default, the workflow reads basecaller model metadata from the input reads. Use this option only if the metadata is absent or incorrect. A list of supported model names is available in the Dorado documentation."
+        },
+        "clair3_model_path": {
+          "type": "string",
+          "title": "Clair3 model path / name",
+          "description": "Optional Clair3 model path or name override.",
+          "help_text": "By default, the workflow selects the Clair3 model matching the detected basecaller configuration, falling back to the current ONT HAC model. Provide a path or model name here to override automatic selection."
+        },
+        "clair3_extra_args": {
+          "type": "string",
+          "title": "Clair3 extra arguments",
+          "description": "Additional arguments passed to Clair3.",
+          "help_text": "These arguments are appended verbatim to the `run_clair3.sh` command."
+        },
+        "min_sv_support": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 1,
+          "title": "Minimum SV read support",
+          "description": "Minimum number of supporting reads required to report an SV.",
+          "help_text": "Structural variants supported by fewer reads than this threshold are filtered from the final VCF."
+        },
+        "min_sv_vaf": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Minimum SV VAF",
+          "description": "Minimum variant allele frequency for a reported SV.",
+          "help_text": "Structural variants with an allele frequency below this threshold are filtered from the final VCF. Set to 0 to disable VAF filtering."
+        },
+        "sniffles_extra_args": {
+          "type": "string",
+          "title": "Sniffles extra arguments",
+          "description": "Additional arguments passed to Sniffles.",
+          "help_text": "These arguments are appended verbatim to the Sniffles command."
+        },
+        "cuban_repeats": {
+          "type": "string",
+          "format": "file-path",
+          "title": "CUBAN repeats BED",
+          "description": "BED file of tandem repeat coordinates for CUBAN SV annotation.",
+          "help_text": "Optional. When provided, CUBAN uses this repeat annotation to refine structural variant calls within tandem repeat regions."
+        },
+        "cuban_extra_args": {
+          "type": "string",
+          "title": "CUBAN extra arguments",
+          "description": "Additional arguments passed to CUBAN.",
+          "help_text": "These arguments are appended verbatim to the CUBAN command."
+        }
       }
     },
     "denovo_options": {
-      "title": "De novo assembly options",
+      "title": "De Novo Assembly Options",
       "type": "object",
+      "fa_icon": "fas fa-project-diagram",
+      "description": "Parameters for de novo amplicon assembly with miniasm / SPOA / Medaka (denovo and both modes).",
       "properties": {
-        "max_de_novo_contigs": { "type": "integer", "default": 2, "minimum": 1 },
-        "force_spoa_length_threshold": { "type": "integer", "default": 2000, "minimum": 1 },
-        "spoa_minimum_relative_coverage": { "type": "number", "default": 0.15, "minimum": 0 },
-        "spoa_max_allowed_read_length": { "type": "integer", "default": 5000, "minimum": 1 },
-        "minimum_mean_depth": { "type": "number", "default": 30, "minimum": 0 },
-        "primary_alignments_threshold": { "type": "number", "default": 0.7, "minimum": 0, "maximum": 1 },
-        "medaka_target_depth_per_strand": { "type": "integer", "default": 150, "minimum": 1 },
-        "miniasm_extra_args": { "type": ["string", "null"] },
-        "racon_extra_args": { "type": ["string", "null"] },
-        "medaka_extra_args": { "type": ["string", "null"] }
+        "max_de_novo_contigs": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 1,
+          "title": "Maximum de novo contigs",
+          "description": "Maximum number of contigs expected per sample from de novo assembly.",
+          "help_text": "For diploid targets, set to 2 to allow both haplotype assemblies. Assemblies producing more contigs than this threshold will trigger a QC warning."
+        },
+        "force_spoa_length_threshold": {
+          "type": "integer",
+          "default": 2000,
+          "minimum": 1,
+          "title": "Force SPOA length threshold",
+          "description": "If the miniasm consensus is shorter than this (bp), force SPOA consensus instead.",
+          "help_text": "miniasm occasionally produces slightly truncated assemblies for short amplicons. SPOA is more robust in these cases. Lowering this threshold forces SPOA more aggressively."
+        },
+        "spoa_minimum_relative_coverage": {
+          "type": "number",
+          "default": 0.15,
+          "minimum": 0,
+          "title": "SPOA minimum relative coverage",
+          "description": "Fraction of sample reads passed to SPOA's `--min-coverage` option.",
+          "help_text": "Must be between 0.0 and 1.0. The result of multiplying this fraction by the per-sample read count is passed to SPOA's `--min-coverage` threshold."
+        },
+        "spoa_max_allowed_read_length": {
+          "type": "integer",
+          "default": 5000,
+          "minimum": 1,
+          "title": "SPOA maximum read length",
+          "description": "SPOA will not run if input reads exceed this length (bp).",
+          "help_text": "SPOA was not designed for very long reads. If the filtered read set contains reads longer than this value, SPOA is skipped for that sample."
+        },
+        "minimum_mean_depth": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "title": "Minimum mean depth",
+          "description": "Minimum mean depth of re-aligned reads for a draft consensus to pass QC.",
+          "help_text": "Draft assemblies with an average re-alignment depth below this threshold are flagged as low-quality in the report."
+        },
+        "primary_alignments_threshold": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 1,
+          "title": "Primary alignments threshold",
+          "description": "Minimum fraction of primary alignments for a draft consensus to pass QC.",
+          "help_text": "Draft assemblies where fewer than this fraction of re-aligned reads produce primary alignments are flagged as low-quality."
+        },
+        "medaka_target_depth_per_strand": {
+          "type": "integer",
+          "default": 150,
+          "minimum": 1,
+          "title": "Medaka target depth per strand",
+          "description": "Per-strand depth target for Medaka polishing downsampling.",
+          "help_text": "Medaka performs best at even depths between 80–400× per strand. The workflow downsamples to this per-strand depth before Medaka. Changing this value is discouraged."
+        },
+        "miniasm_extra_args": {
+          "type": "string",
+          "title": "miniasm extra arguments",
+          "description": "Additional arguments passed to miniasm.",
+          "help_text": "These arguments are appended verbatim to the miniasm command."
+        },
+        "racon_extra_args": {
+          "type": "string",
+          "title": "Racon extra arguments",
+          "description": "Additional arguments passed to Racon.",
+          "help_text": "These arguments are appended verbatim to the Racon polishing command."
+        },
+        "medaka_extra_args": {
+          "type": "string",
+          "title": "Medaka extra arguments",
+          "description": "Additional arguments passed to Medaka.",
+          "help_text": "These arguments are appended verbatim to the Medaka polishing command."
+        }
       }
     },
     "misc_options": {
-      "title": "Other options",
+      "title": "Miscellaneous Options",
       "type": "object",
+      "fa_icon": "far fa-question-circle",
+      "description": "Internal and advanced options not normally changed by the user.",
       "properties": {
-        "help": { "type": "boolean", "default": false, "hidden": true },
-        "version": { "type": "boolean", "default": false, "hidden": true },
-        "validate_params": { "type": "boolean", "default": true, "hidden": true },
-        "show_hidden_params": { "type": "boolean", "default": false, "hidden": true },
-        "monochrome_logs": { "type": "boolean", "default": false, "hidden": true }
+        "help": {
+          "type": "boolean",
+          "default": false,
+          "title": "Display help",
+          "description": "Display help text and exit.",
+          "hidden": true
+        },
+        "version": {
+          "type": "boolean",
+          "default": false,
+          "title": "Display version",
+          "description": "Display workflow version and exit.",
+          "hidden": true
+        },
+        "validate_params": {
+          "type": "boolean",
+          "default": true,
+          "title": "Validate parameters",
+          "description": "Validate parameters against the schema at startup.",
+          "hidden": true
+        },
+        "show_hidden_params": {
+          "type": "boolean",
+          "default": false,
+          "title": "Show hidden parameters",
+          "description": "Show all parameters including hidden ones.",
+          "hidden": true
+        },
+        "monochrome_logs": {
+          "type": "boolean",
+          "default": false,
+          "title": "Monochrome logs",
+          "description": "Disable colour in log output.",
+          "hidden": true
+        }
       }
     }
   },
-  "properties": {},
+  "properties": {
+    "aws_image_prefix": { "type": "string", "hidden": true },
+    "aws_queue": { "type": "string", "hidden": true },
+    "monochrome_logs": { "type": "boolean", "hidden": true },
+    "validate_params": { "type": "boolean", "default": true, "hidden": true },
+    "show_hidden_params": { "type": "boolean", "hidden": true }
+  },
   "allOf": [
     { "$ref": "#/definitions/input_options" },
     { "$ref": "#/definitions/workflow_options" },
@@ -112,17 +477,13 @@
     { "$ref": "#/definitions/denovo_options" },
     { "$ref": "#/definitions/misc_options" }
   ],
-  "oneOf": [
-    {
-      "required": ["fastq"],
-      "properties": { "fastq": { "type": "string" } },
-      "not": { "properties": { "bam": { "type": "string" } } }
-    },
-    {
-      "required": ["bam"],
-      "properties": { "bam": { "type": "string" } },
-      "not": { "properties": { "fastq": { "type": "string" } } }
+  "if": {
+    "properties": {
+      "analysis_mode": { "enum": ["reference", "both"] }
     }
-  ],
-  "required": ["reference"]
+  },
+  "then": {
+    "required": ["reference"]
+  },
+  "else": {}
 }
