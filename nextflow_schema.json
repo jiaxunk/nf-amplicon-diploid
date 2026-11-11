@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/jiaxunk/nf-amplicon-diploid/main/nextflow_schema.json",
+  "title": "nf-amplicon-diploid",
+  "description": "Diploid ONT amplicon analysis workflow. Ticket 01 implements reference alignment and preprocessing.",
+  "type": "object",
+  "definitions": {
+    "input_options": {
+      "title": "Input options",
+      "type": "object",
+      "properties": {
+        "fastq": { "type": ["string", "null"], "format": "file-path", "exists": true, "description": "FASTQ file or directory; mutually exclusive with bam." },
+        "bam": { "type": ["string", "null"], "format": "file-path", "exists": true, "description": "BAM/uBAM file or directory; mutually exclusive with fastq." },
+        "sample": { "type": ["string", "null"], "description": "Name for a single input without a sample sheet." },
+        "sample_sheet": { "type": ["string", "null"], "format": "file-path", "exists": true, "description": "CSV file mapping barcodes to aliases and optional sample metadata." },
+        "reference": { "type": "string", "format": "file-path", "exists": true, "description": "Reference FASTA used for alignment." },
+        "target": { "type": ["string", "null"], "format": "file-path", "exists": true, "description": "Optional target BED. Each reference contig is used when omitted." },
+        "analyse_unclassified": { "type": "boolean", "default": false, "description": "Include reads from unclassified directories." },
+        "analyse_fail": { "type": "boolean", "default": false, "description": "Include reads from failed-read directories." }
+      }
+    },
+    "workflow_options": {
+      "title": "Workflow options",
+      "type": "object",
+      "properties": {
+        "out_dir": { "type": "string", "format": "directory-path", "default": "output", "description": "Output directory." },
+        "analysis_mode": { "type": "string", "enum": ["reference", "denovo", "both"], "default": "reference", "description": "Analysis mode. Reference mode is implemented by ticket 01." },
+        "force_remap": { "type": "boolean", "default": false, "description": "Convert and remap BAM reads even when headers match the reference." },
+        "disable_ping": { "type": "boolean", "default": false, "description": "Disable workflow telemetry." },
+        "store_dir": { "type": ["string", "null"], "format": "directory-path", "description": "Reserved for workflow data caching." },
+        "combine_results": { "type": "boolean", "default": false, "description": "Reserved for combined analysis outputs." },
+        "igv": { "type": "boolean", "default": false, "description": "Enable IGV configuration output." }
+      }
+    },
+    "preprocessing_options": {
+      "title": "Read filtering and trimming",
+      "type": "object",
+      "properties": {
+        "min_read_length": { "type": "integer", "default": 300, "minimum": 0, "description": "Minimum read length retained before downsampling." },
+        "max_read_length": { "type": ["integer", "null"], "minimum": 1, "description": "Optional maximum read length retained before downsampling." },
+        "min_read_qual": { "type": "number", "default": 10, "minimum": 0, "description": "Minimum mean read quality retained before downsampling." },
+        "reads_downsampling_size": { "type": "integer", "default": 2000, "minimum": 0, "description": "Maximum reads retained per sample after filtering; 0 disables downsampling." },
+        "drop_frac_longest_reads": { "type": "number", "default": 0.05, "minimum": 0, "maximum": 1, "description": "Fraction of longest reads excluded before length-mode-preserving subsetting." },
+        "take_longest_remaining_reads": { "type": "boolean", "default": true, "description": "Preserve distinct read-length modes when downsampling." },
+        "trimmer": { "type": "string", "enum": ["porechop", "dorado", "none"], "default": "porechop", "description": "Adapter/barcode trimming method." },
+        "trimmer_extra_args": { "type": ["string", "null"], "description": "Additional options passed to the selected trimmer." },
+        "min_n_reads": { "type": "integer", "default": 40, "minimum": 0, "description": "Minimum read count after trimming; samples below this value are omitted." }
+      }
+    },
+    "alignment_options": {
+      "title": "Reference alignment",
+      "type": "object",
+      "properties": {
+        "minimap2_extra_args": { "type": ["string", "null"], "description": "Additional options passed to minimap2." },
+        "number_depth_windows": { "type": "integer", "default": 100, "minimum": 1 },
+        "min_coverage": { "type": "integer", "default": 20, "minimum": 0 },
+        "threads": { "type": "integer", "default": 4, "minimum": 1 }
+      }
+    },
+    "variant_options": {
+      "title": "Variant calling options",
+      "type": "object",
+      "properties": {
+        "snp": { "type": "boolean", "default": true },
+        "sv": { "type": "boolean", "default": true },
+        "phased": { "type": "boolean", "default": true },
+        "override_basecaller_cfg": { "type": ["string", "null"] },
+        "clair3_model_path": { "type": ["string", "null"], "format": "file-path" },
+        "clair3_extra_args": { "type": ["string", "null"] },
+        "min_sv_support": { "type": "integer", "default": 5, "minimum": 1 },
+        "min_sv_vaf": { "type": "number", "default": 0.1, "minimum": 0, "maximum": 1 },
+        "sniffles_extra_args": { "type": ["string", "null"] },
+        "cuban_repeats": { "type": ["string", "null"], "format": "file-path" },
+        "cuban_extra_args": { "type": ["string", "null"] }
+      }
+    },
+    "denovo_options": {
+      "title": "De novo assembly options",
+      "type": "object",
+      "properties": {
+        "max_de_novo_contigs": { "type": "integer", "default": 2, "minimum": 1 },
+        "force_spoa_length_threshold": { "type": "integer", "default": 2000, "minimum": 1 },
+        "spoa_minimum_relative_coverage": { "type": "number", "default": 0.15, "minimum": 0 },
+        "spoa_max_allowed_read_length": { "type": "integer", "default": 5000, "minimum": 1 },
+        "minimum_mean_depth": { "type": "number", "default": 30, "minimum": 0 },
+        "primary_alignments_threshold": { "type": "number", "default": 0.7, "minimum": 0, "maximum": 1 },
+        "medaka_target_depth_per_strand": { "type": "integer", "default": 150, "minimum": 1 },
+        "miniasm_extra_args": { "type": ["string", "null"] },
+        "racon_extra_args": { "type": ["string", "null"] },
+        "medaka_extra_args": { "type": ["string", "null"] }
+      }
+    },
+    "misc_options": {
+      "title": "Other options",
+      "type": "object",
+      "properties": {
+        "help": { "type": "boolean", "default": false, "hidden": true },
+        "version": { "type": "boolean", "default": false, "hidden": true },
+        "validate_params": { "type": "boolean", "default": true, "hidden": true },
+        "show_hidden_params": { "type": "boolean", "default": false, "hidden": true },
+        "monochrome_logs": { "type": "boolean", "default": false, "hidden": true }
+      }
+    }
+  },
+  "properties": {},
+  "allOf": [
+    { "$ref": "#/definitions/input_options" },
+    { "$ref": "#/definitions/workflow_options" },
+    { "$ref": "#/definitions/preprocessing_options" },
+    { "$ref": "#/definitions/alignment_options" },
+    { "$ref": "#/definitions/variant_options" },
+    { "$ref": "#/definitions/denovo_options" },
+    { "$ref": "#/definitions/misc_options" }
+  ],
+  "oneOf": [
+    {
+      "required": ["fastq"],
+      "properties": { "fastq": { "type": "string" } },
+      "not": { "properties": { "bam": { "type": "string" } } }
+    },
+    {
+      "required": ["bam"],
+      "properties": { "bam": { "type": "string" } },
+      "not": { "properties": { "fastq": { "type": "string" } } }
+    }
+  ],
+  "required": ["reference"]
+}

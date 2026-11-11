@@ -1,0 +1,28 @@
+work/
+.nextflow/
+.nextflow.log*
+output/
+test_out*/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.2me
+.DS_Store
+.venv/
+
+# Local agent instructions, skills, and planning notes
+AGENTS.md
+GEMINI.md
+CLAUDE.md
+.agents/
+.gemini/
+.claude/
+.codex/
+.scratch/
+scratch/
+docs/agents/
+ideation.txt
+.system_generated/
+
+# Large local benchmark data
+example/
