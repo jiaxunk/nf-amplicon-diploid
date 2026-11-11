@@ -26,19 +26,6 @@
           "description": "BAM or unaligned BAM (uBAM) files to use in the analysis.",
           "help_text": "This accepts one of four cases: (i) the path to a single BAM file; (ii) the path to a folder containing BAM files; (iii) the path to a folder containing one level of sub-folders which in turn contain BAM files; (iv) the path to a MinKNOW experiment folder containing sub-folders for each sequenced sample. In the first and second case, a sample name can be supplied with `--sample`. In the third case, the data is assumed to be multiplexed with the names of the sub-folders as barcodes, and a sample sheet can be provided with `--sample_sheet`. Already-aligned BAMs matching the reference will skip remapping unless `--force_remap` is set. Mutually exclusive with `--fastq`."
         },
-        "sample": {
-          "type": "string",
-          "title": "Sample name",
-          "description": "A single sample name for non-multiplexed data.",
-          "help_text": "Permissible when passing a single FASTQ/BAM file or a directory of such files. Not used when a sample sheet is provided."
-        },
-        "sample_sheet": {
-          "type": "string",
-          "format": "file-path",
-          "title": "Sample sheet",
-          "description": "A CSV file used to map barcodes to sample aliases.",
-          "help_text": "The sample sheet is a CSV file with, minimally, columns named `barcode` and `alias`. Extra columns are allowed. Provide when the input data is a barcoded directory tree."
-        },
         "reference": {
           "type": "string",
           "format": "file-path",
@@ -70,10 +57,14 @@
       },
       "oneOf": [
         {
-          "required": ["fastq"]
+          "required": [
+            "fastq"
+          ]
         },
         {
-          "required": ["bam"]
+          "required": [
+            "bam"
+          ]
         }
       ]
     },
@@ -85,11 +76,15 @@
       "properties": {
         "analysis_mode": {
           "type": "string",
-          "enum": ["reference", "denovo", "both"],
+          "enum": [
+            "reference",
+            "denovo",
+            "both"
+          ],
           "default": "reference",
           "title": "Analysis mode",
           "description": "Choose the analysis strategy for this run.",
-          "help_text": "`reference` — align reads to a reference FASTA and call variants (SNPs, SVs, phased consensus). `denovo` — perform haplotype-aware de novo assembly without a reference (reference FASTA is optional). `both` — run reference-based and de novo analyses in parallel (reference FASTA required)."
+          "help_text": "`reference` \u2014 align reads to a reference FASTA and call variants (SNPs, SVs, phased consensus). `denovo` \u2014 perform haplotype-aware de novo assembly without a reference (reference FASTA is optional). `both` \u2014 run reference-based and de novo analyses in parallel (reference FASTA required)."
         },
         "out_dir": {
           "type": "string",
@@ -191,11 +186,15 @@
         },
         "trimmer": {
           "type": "string",
-          "enum": ["porechop", "dorado", "none"],
+          "enum": [
+            "porechop",
+            "dorado",
+            "none"
+          ],
           "default": "porechop",
           "title": "Trimmer",
           "description": "Adapter and barcode trimming method applied before alignment.",
-          "help_text": "`porechop` — trim adapters and barcodes with Porechop (recommended for most ONT libraries). `dorado` — use Dorado's built-in adapter trimmer. `none` — skip trimming entirely."
+          "help_text": "`porechop` \u2014 trim adapters and barcodes with Porechop (recommended for most ONT libraries). `dorado` \u2014 use Dorado's built-in adapter trimmer. `none` \u2014 skip trimming entirely."
         },
         "trimmer_extra_args": {
           "type": "string",
@@ -395,7 +394,7 @@
           "minimum": 1,
           "title": "Medaka target depth per strand",
           "description": "Per-strand depth target for Medaka polishing downsampling.",
-          "help_text": "Medaka performs best at even depths between 80–400× per strand. The workflow downsamples to this per-strand depth before Medaka. Changing this value is discouraged."
+          "help_text": "Medaka performs best at even depths between 80\u2013400\u00d7 per strand. The workflow downsamples to this per-strand depth before Medaka. Changing this value is discouraged."
         },
         "miniasm_extra_args": {
           "type": "string",
@@ -459,31 +458,92 @@
           "hidden": true
         }
       }
+    },
+    "sample_options": {
+      "title": "Sample Options",
+      "type": "object",
+      "fa_icon": "fas fa-vials",
+      "description": "Parameters that relate to samples such as sample sheets and sample names.",
+      "properties": {
+        "sample_sheet": {
+          "type": "string",
+          "format": "file-path",
+          "title": "Sample sheet",
+          "description": "A CSV file used to map barcodes to sample aliases.",
+          "help_text": "The sample sheet is a CSV file with, minimally, columns named `barcode` and `alias`. Extra columns are allowed. Provide when the input data is a barcoded directory tree."
+        },
+        "sample": {
+          "type": "string",
+          "title": "Sample name",
+          "description": "A single sample name for non-multiplexed data.",
+          "help_text": "Permissible when passing a single FASTQ/BAM file or a directory of such files. Not used when a sample sheet is provided."
+        }
+      }
     }
   },
   "properties": {
-    "aws_image_prefix": { "type": "string", "hidden": true },
-    "aws_queue": { "type": "string", "hidden": true },
-    "monochrome_logs": { "type": "boolean", "hidden": true },
-    "validate_params": { "type": "boolean", "default": true, "hidden": true },
-    "show_hidden_params": { "type": "boolean", "hidden": true }
+    "aws_image_prefix": {
+      "type": "string",
+      "hidden": true
+    },
+    "aws_queue": {
+      "type": "string",
+      "hidden": true
+    },
+    "monochrome_logs": {
+      "type": "boolean",
+      "hidden": true
+    },
+    "validate_params": {
+      "type": "boolean",
+      "default": true,
+      "hidden": true
+    },
+    "show_hidden_params": {
+      "type": "boolean",
+      "hidden": true
+    }
   },
   "allOf": [
-    { "$ref": "#/definitions/input_options" },
-    { "$ref": "#/definitions/workflow_options" },
-    { "$ref": "#/definitions/preprocessing_options" },
-    { "$ref": "#/definitions/alignment_options" },
-    { "$ref": "#/definitions/variant_options" },
-    { "$ref": "#/definitions/denovo_options" },
-    { "$ref": "#/definitions/misc_options" }
+    {
+      "$ref": "#/definitions/workflow_options"
+    },
+    {
+      "$ref": "#/definitions/input_options"
+    },
+    {
+      "$ref": "#/definitions/sample_options"
+    },
+    {
+      "$ref": "#/definitions/preprocessing_options"
+    },
+    {
+      "$ref": "#/definitions/alignment_options"
+    },
+    {
+      "$ref": "#/definitions/variant_options"
+    },
+    {
+      "$ref": "#/definitions/denovo_options"
+    },
+    {
+      "$ref": "#/definitions/misc_options"
+    }
   ],
   "if": {
     "properties": {
-      "analysis_mode": { "enum": ["reference", "both"] }
+      "analysis_mode": {
+        "enum": [
+          "reference",
+          "both"
+        ]
+      }
     }
   },
   "then": {
-    "required": ["reference"]
+    "required": [
+      "reference"
+    ]
   },
   "else": {}
 }
