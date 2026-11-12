@@ -289,6 +289,12 @@
           "description": "Optional Clair3 model path or name override.",
           "help_text": "By default, the workflow selects the Clair3 model matching the detected basecaller configuration, falling back to the current ONT HAC model. Provide a path or model name here to override automatic selection."
         },
+        "clair3_model": {
+          "type": "string",
+          "title": "Clair3 model name",
+          "description": "Optional Clair3 model name override (alias for clair3_model_path).",
+          "help_text": "Alias for clair3_model_path. Provide a model name (e.g. r1041_e82_400bps_hac_v420) to override automatic selection."
+        },
         "clair3_extra_args": {
           "type": "string",
           "title": "Clair3 extra arguments",

@@ -162,11 +162,13 @@ workflow {
         if (params.phased) {
             phase_snp(call_clair3.out.calls)
             make_haplotype_consensus(phase_snp.out.consensus_inputs)
+            ch_snp_reports = phase_snp.out.report_dirs.map { meta, report_dir -> report_dir }.collect()
         } else {
             make_haplotype_consensus(call_clair3.out.calls)
+            ch_snp_reports = call_clair3.out.report_dirs.map { meta, report_dir -> report_dir }.collect()
         }
         make_snp_report(
-            params.phased ? phase_snp.out.report_dirs.collect() : call_clair3.out.report_dirs.collect(),
+            ch_snp_reports,
             ch_params,
             ch_versions
         )
@@ -469,27 +471,34 @@ process call_clair3 {
     label 'wf_human_snp'
     cpus 8
     memory '16 GB'
-    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_snp.vcf.gz*'
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_snp.vcf.gz*', enabled: !params.phased
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: 'variants.tsv', enabled: !params.phased
     input:
         tuple val(meta), path(bam), path(bai), path(reference), path(reference_fai), path(target_bed), path(report_data)
     output:
         tuple val(meta), path("${meta.alias}"), emit: report_dirs
         tuple val(meta), path(bam), path(reference), path(target_bed), path('clair3_out/merge_output.vcf.gz'), path('clair3_out/merge_output.vcf.gz.tbi'), path("${meta.alias}"), emit: calls
+        tuple val(meta), path("${meta.alias}.nf_snp.vcf.gz*"), optional: true, emit: unphased_vcf
+        tuple val(meta), path("variants.tsv"), optional: true, emit: unphased_tsv
     script:
-    def model = params.override_basecaller_cfg ?: params.clair3_model_path ?: ''
+    def model = params.override_basecaller_cfg ?: (params.containsKey('clair3_model') && params.clair3_model ? params.clair3_model : params.clair3_model_path) ?: ''
     def extra = params.clair3_extra_args ?: ''
+    def phasedArg = params.phased ? 'true' : 'false'
     """
     mkdir -p '${meta.alias}'
     samtools faidx '$reference'
     model='${model ?: ''}'
     if [ -z "\$model" ] && [ -s '$report_data/post-trim-basecallers.tsv' ]; then
-        model=\$(awk 'NR==2 { print \$2; exit }' '$report_data/post-trim-basecallers.tsv' | sed -E 's/^dna_r10\\.4\\.1_e8\\.2_/r1041_e82_/; s/@v([0-9]+)\\.([0-9]+)\\.([0-9]+)/_v\\1\\2\\3/')
+        model=\$(awk 'NR==2 { print \$2; exit }' '$report_data/post-trim-basecallers.tsv')
     fi
-    model=\$(printf '%s' "\$model" | sed -E 's/^dna_r10\\.4\\.1_e8\\.2_/r1041_e82_/; s/^r10\\.4\\.1_e8\\.2_/r1041_e82_/; s/@v([0-9]+)\\.([0-9]+)\\.([0-9]+)/_v\\1\\2\\3/')
+    if [ -n "\$model" ]; then
+        model=\$(printf '%s' "\$model" | sed -E 's/^dna_//; s/^r10\\.4\\.1_e8\\.2_/r1041_e82_/; s/@v([0-9]+)\\.([0-9]+)\\.([0-9]+)/_v\\1\\2\\3/; s/\\.([0-9]+)\$/\\1/')
+    fi
     model="\${model:-r1041_e82_400bps_hac_v420}"
     export CONDA_PREFIX=\$(dirname "\$(dirname "\$(which clair3.py)")")
-    find /opt -type d -name '*r1041*' 2>/dev/null | head -20 > available-models.txt
-    if [ -d "/opt/custflow/epi2meuser/models/\$model" ]; then model="/opt/custflow/epi2meuser/models/\$model"; fi
+    if [ -d "/opt/custflow/epi2meuser/models/\$model" ]; then
+        model="/opt/custflow/epi2meuser/models/\$model"
+    fi
     run_clair3.sh \\
         --bam_fn='$bam' \\
         --ref_fn='$reference' \\
@@ -498,13 +507,19 @@ process call_clair3 {
         --model_path="\$model" \\
         --bed_fn='$target_bed' \\
         --output='clair3_out' \\
+        --include_all_ctgs \\
         $extra
     tabix -f -p vcf clair3_out/merge_output.vcf.gz
-    cp clair3_out/merge_output.vcf.gz '${meta.alias}/${meta.alias}.nf_snp.vcf.gz'
-    tabix -f -p vcf '${meta.alias}/${meta.alias}.nf_snp.vcf.gz'
-    bcftools query -f '%CHROM\\t%POS\\t%REF\\t%ALT\\t[%GT]\\t%FILTER\\n' '${meta.alias}/${meta.alias}.nf_snp.vcf.gz' \\
-        | awk 'BEGIN { OFS="\\t"; print "target","position","ref","alt","genotype","filter","type" } { t=(length(\$3)==1 && length(\$4)==1 ? "SNV" : "INDEL"); print \$1,\$2,\$3,\$4,\$5,\$6,t }' \\
-        > '${meta.alias}/variants.tsv'
+    if [ '$phasedArg' = false ]; then
+        cp clair3_out/merge_output.vcf.gz '${meta.alias}.nf_snp.vcf.gz'
+        cp clair3_out/merge_output.vcf.gz.tbi '${meta.alias}.nf_snp.vcf.gz.tbi'
+        workflow-glue extract_snp_data \\
+            --bam '$bam' \\
+            --vcf clair3_out/merge_output.vcf.gz \\
+            --target '$target_bed' \\
+            --out-dir '${meta.alias}'
+        cp '${meta.alias}/variants.tsv' 'variants.tsv'
+    fi
     """
 }
 
@@ -513,31 +528,38 @@ process phase_snp {
     cpus 4
     memory '8 GB'
     publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_snp*'
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: 'variants.tsv'
     publishDir "${params.out_dir}/${meta.alias}/alignments", mode: 'copy', pattern: '*.haplotagged.bam*'
     input:
         tuple val(meta), path(bam), path(reference), path(target_bed), path(vcf), path(vcf_index), path(report_dir, stageAs: 'clair3-report')
     output:
-        tuple val(meta), path('phased.bam'), path('phased.vcf.gz'), path('phased.vcf.gz.tbi'), path(reference), path(target_bed), path(report_dir), emit: consensus_inputs
+        tuple val(meta), path('phased.bam'), path(reference), path(target_bed), path('phased.vcf.gz'), path('phased.vcf.gz.tbi'), path("${meta.alias}"), emit: consensus_inputs
         tuple val(meta), path("${meta.alias}"), emit: report_dirs
+        tuple val(meta), path("${meta.alias}.haplotagged.bam*"), emit: haplotagged_bam
+        tuple val(meta), path("${meta.alias}.nf_snp*"), emit: snp_vcf
+        tuple val(meta), path("variants.tsv"), emit: variants_tsv
     script:
     """
     samtools faidx '$reference'
     samtools index '$bam'
-    whatshap phase --ignore-read-groups --reference '$reference' --output phased.vcf.gz '$vcf' '$bam'
+    whatshap phase --indels --ignore-read-groups --reference '$reference' --output phased.vcf.gz '$vcf' '$bam'
     tabix -f -p vcf phased.vcf.gz
-    whatshap haplotag --ignore-read-groups --reference '$reference' --output phased.bam phased.vcf.gz '$bam'
+    whatshap haplotag --ignore-read-groups --skip-missing-contigs --reference '$reference' --output phased.bam phased.vcf.gz '$bam'
     samtools index phased.bam
-    whatshap haplotagphase --ignore-read-groups --only-indels --reference '$reference' --output phased-with-indels.vcf phased.vcf.gz phased.bam
-    bgzip -c phased-with-indels.vcf > phased.vcf.gz
-    tabix -f -p vcf phased.vcf.gz
-    whatshap stats --gtf haploblocks.gtf phased.vcf.gz
+    touch haploblocks.gtf
+    whatshap stats --gtf haploblocks.gtf phased.vcf.gz || true
     cp phased.bam '${meta.alias}.haplotagged.bam'
     cp phased.bam.bai '${meta.alias}.haplotagged.bam.bai'
     cp phased.vcf.gz '${meta.alias}.nf_snp.vcf.gz'
     cp phased.vcf.gz.tbi '${meta.alias}.nf_snp.vcf.gz.tbi'
     cp haploblocks.gtf '${meta.alias}.nf_snp.haploblocks.gtf'
     mkdir -p '${meta.alias}'
-    cp clair3-report/variants.tsv '${meta.alias}/variants.tsv'
+    workflow-glue extract_snp_data \\
+        --bam phased.bam \\
+        --vcf phased.vcf.gz \\
+        --target '$target_bed' \\
+        --out-dir '${meta.alias}'
+    cp '${meta.alias}/variants.tsv' 'variants.tsv'
     """
 }
 
@@ -549,27 +571,33 @@ process make_haplotype_consensus {
     input:
         tuple val(meta), path(bam), path(reference), path(target_bed), path(vcf), path(vcf_index), path(report_dir)
     output:
-        tuple val(meta), path('consensus')
+        tuple val(meta), path('*.fasta'), emit: consensus
     script:
     def phasedArg = params.phased ? 'true' : 'false'
     """
-    mkdir -p consensus
+    samtools faidx '$reference'
     samtools index '$bam'
     while IFS=\$'\\t' read -r chrom start end target; do
-        [[ -z "$chrom" || "$chrom" == \\#* ]] && continue
-        target_ref="target.fa"
-        samtools faidx '$reference' "\$chrom:\$((start + 1))-\$end" > "\$target_ref"
+        [[ -z "\$chrom" || "\$chrom" == \\#* || "\$chrom" == track* || "\$chrom" == browser* ]] && continue
+        target="\${target:-\${chrom}_\${start}_\${end}}"
+
         samtools depth -aa -r "\$chrom:\$((start + 1))-\$end" '$bam' \
-            | awk -v c="\$chrom" -v s="\$start" -v cutoff=${params.min_coverage} 'BEGIN { OFS="\\t" } \$3 < cutoff { print c,\$2-s-1,\$2-s }' > low-depth.bed
-        bedtools maskfasta -fi "\$target_ref" -bed low-depth.bed -fo masked.fa
+            | awk -v c="\$chrom" -v cutoff=${params.min_coverage} 'BEGIN { OFS="\\t" } \$3 < cutoff { print c, \$2-1, \$2 }' > low-depth.bed
+
         if [ '$phasedArg' = true ]; then
-            bcftools consensus -r "\$chrom:\$((start + 1))-\$end" -f masked.fa -H 1 '$vcf' \
-                > "consensus/${meta.alias}_\${target}_hap1.fasta"
-            bcftools consensus -r "\$chrom:\$((start + 1))-\$end" -f masked.fa -H 2 '$vcf' \
-                > "consensus/${meta.alias}_\${target}_hap2.fasta"
+            samtools faidx '$reference' "\$chrom:\$((start + 1))-\$end" \
+                | bcftools consensus -i 'FILTER="PASS"' -H 1 -m low-depth.bed -f - '$vcf' \
+                | sed "1s/.*/>${meta.alias}_\${target}_hap1/" \
+                > "${meta.alias}_\${target}_hap1.fasta"
+            samtools faidx '$reference' "\$chrom:\$((start + 1))-\$end" \
+                | bcftools consensus -i 'FILTER="PASS"' -H 2 -m low-depth.bed -f - '$vcf' \
+                | sed "1s/.*/>${meta.alias}_\${target}_hap2/" \
+                > "${meta.alias}_\${target}_hap2.fasta"
         else
-            bcftools consensus --iupac-codes -r "\$chrom:\$((start + 1))-\$end" -f masked.fa '$vcf' \
-                > "consensus/${meta.alias}_\${target}.consensus.fasta"
+            samtools faidx '$reference' "\$chrom:\$((start + 1))-\$end" \
+                | bcftools consensus -i 'FILTER="PASS"' --iupac-codes -m low-depth.bed -f - '$vcf' \
+                | sed "1s/.*/>${meta.alias}_\${target}.consensus/" \
+                > "${meta.alias}_\${target}.consensus.fasta"
         fi
     done < '$target_bed'
     """

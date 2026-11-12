@@ -31,8 +31,16 @@ class AlignmentSampleData:
         self.sample_alias = data_dir.name
 
         self.fastcat_per_file = self._read_tsv(data_dir / "per-file-stats.tsv")
-        self.length_hist = load_histogram(data_dir, "length")
-        self.qual_hist = load_histogram(data_dir, "quality")
+        self.length_hist = (
+            load_histogram(data_dir, "length")
+            if (data_dir / "length.hist").exists()
+            else pd.DataFrame()
+        )
+        self.qual_hist = (
+            load_histogram(data_dir, "quality")
+            if (data_dir / "quality.hist").exists()
+            else pd.DataFrame()
+        )
 
         post_trim_path = data_dir / "post-trim-per-file-stats.tsv"
         if not post_trim_path.exists():
