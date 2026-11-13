@@ -1,0 +1,472 @@
+import random
+import warnings
+
+import numpy as np
+import pandas as pd
+import pysam
+
+
+def cigartuples_to_array(cigartuples):
+    """ Converts list of cigar tuples to numpy array. """
+    cigar_array = []
+    for cigartuple in cigartuples:
+        cigar_array += [cigartuple[0]] * cigartuple[1]
+    return np.array(cigar_array)
+
+
+def compute_aln_matrix(bam, chrom, start, stop, collapse_ins=True, max_reads=5000, downsample='early_stop'):
+    """ Computes alignment matrix consisting of CIGAR integers for a given region.
+
+    Args:
+        max_reads (int, optional): Maximum number of reads to include. None disables downsampling.
+            Defaults to 5000.
+        downsample (str, optional): 'early_stop' stops fetching once max_reads reads are collected;
+            'random' fetches all reads then samples max_reads of them (seeded, deterministic).
+            Defaults to 'early_stop'.
+    """
+    size = stop - start
+    reads = []
+    for read in bam.fetch(chrom, max(0, start), stop):
+        if not read.is_unmapped and not read.is_duplicate and not read.is_qcfail:
+            reads.append(read)
+            if downsample == 'early_stop' and max_reads is not None and len(reads) >= max_reads:
+                break
+
+    if downsample == 'random' and max_reads is not None and len(reads) > max_reads:
+        reads = random.Random(42).sample(reads, max_reads)
+
+    aln_matrix = -1 * np.ones((len(reads), size))
+    aux_dict = {'split_idx' : [],
+                'low_mapq_idx' : [],
+                'reverse_idx': [],
+                'haplotag_idx': [],
+                'name' : [],
+                'discordant_idx_ff': [],
+                'discordant_idx_rr': [],
+                'discordant_idx_rf': [],
+                'discordant_idx_tx': []}
+
+    for idx, read in enumerate(reads):
+
+        aux_dict['name'].append(read.query_name)
+        if read.has_tag('SA'):
+            aux_dict['split_idx'].append(idx)
+        if read.mapping_quality < 30:
+            aux_dict['low_mapq_idx'].append(idx)
+        if read.is_reverse:
+            aux_dict['reverse_idx'].append(idx)
+        if read.has_tag('HP'):
+            aux_dict['haplotag_idx'].append(read.get_tag('HP'))
+        else:
+            aux_dict['haplotag_idx'].append(-1)
+
+        if not read.mate_is_unmapped:
+            if read.reference_id != read.next_reference_id:
+                aux_dict['discordant_idx_tx'].append(idx)
+
+            elif read.is_reverse and read.mate_is_reverse:
+                aux_dict['discordant_idx_rr'].append(idx)
+
+            elif not read.is_reverse and not read.mate_is_reverse:
+                aux_dict['discordant_idx_ff'].append(idx)
+
+            elif not read.is_reverse and read.mate_is_reverse and read.template_length < 0:
+                aux_dict['discordant_idx_rf'].append(idx)
+
+            elif read.is_reverse and not read.mate_is_reverse and read.template_length > 0:
+                aux_dict['discordant_idx_rf'].append(idx)
+
+        cigararray = cigartuples_to_array(read.cigartuples)
+
+        if read.cigartuples[0][0] == 4 or read.cigartuples[0][0] == 5:
+            read_start = read.reference_start - read.cigartuples[0][1]
+        else:
+            read_start = read.reference_start
+        if read.cigartuples[-1][0] == 4 or read.cigartuples[-1][0] == 5:
+            read_end = read.reference_end + read.cigartuples[-1][1]
+        else:
+            read_end = read.reference_end
+
+        # Identify INS in CIGARARRAY and remove them for alignment visualisation
+        if collapse_ins:
+            ins_idx = np.argwhere(cigararray == 1).flatten() # Find positions of INS (1) in CIGARARRAY
+            diff = np.diff(ins_idx) # Compute difference between consecutive INS positions
+            idx_runs = np.argwhere(diff == 1).flatten() # Find positions of consecutive INS positions
+            mask = np.ones(len(cigararray), bool)
+            mask[ins_idx[idx_runs]] = 0 # Deselect consecutive INS positions exept the first one
+            if len(ins_idx) > 0:
+                mask[ins_idx[ins_idx > 0] - 1] = 0 # Deselect the position before the first INS position to avoid shifting of cigararray
+            cigararray = cigararray[mask] # Remove consecutive INS positions from CIGARARRAY
+
+        if read_start < start and read_end > stop:
+            # Read completely covers region
+            if collapse_ins:
+                start_idx_read = start - read_start
+            else:
+                start_idx_read = np.argwhere(cigararray != 1).flatten()[start - read_start] # shift start by number of INS
+            start_idx_aln = 0
+            end_idx_read = start_idx_read + size
+            end_idx_aln = size
+
+        elif read_start < start and read_end <= stop:
+            # Read is partially contained in region
+            if collapse_ins:
+                start_idx_read = start - read_start
+            else:
+                start_idx_read = np.argwhere(cigararray != 1).flatten()[start - read_start]
+            start_idx_aln = 0
+            if len(cigararray[start_idx_read:]) < size:
+                end_idx_read = len(cigararray)
+                end_idx_aln = end_idx_read - start_idx_read
+            else:
+                end_idx_read = start_idx_read + size
+                end_idx_aln = size
+
+        elif read_start > start and read_end > stop:
+            # Read is partially contained in region
+            start_idx_read = 0
+            start_idx_aln = read_start - start
+            end_idx_read = start_idx_read + size - (read_start - start)
+            end_idx_aln = size
+
+        else:
+            # Read is fully contained in region
+            start_idx_read = 0
+            start_idx_aln = read_start - start
+            if len(cigararray) < size:
+                end_idx_read = len(cigararray)
+                end_idx_aln = start_idx_aln + len(cigararray)
+            else:
+                end_idx_read = start_idx_read + size - (read_start - start)
+                end_idx_aln = size
+
+        if end_idx_aln > 0 and end_idx_read > 0:
+            try:
+                aln_matrix[idx, start_idx_aln:end_idx_aln] = cigararray[start_idx_read:end_idx_read]
+            except (ValueError, IndexError):
+                warnings.warn(f"Skipping read {read.query_name}: alignment matrix assignment failed")
+
+    return aln_matrix, aux_dict
+
+
+def pad_alignment_matrices(aln_matrix_left, aln_matrix_right):
+    """ Pads alignment matrices with zeros to make them the same height. """
+    if len(aln_matrix_right) < len(aln_matrix_left):
+        aln_matrix_right = np.pad(aln_matrix_right, ((0, len(aln_matrix_left) - len(aln_matrix_right)), (0, 0)), 'constant', constant_values=(-1, -1))
+    elif len(aln_matrix_right) > len(aln_matrix_left):
+        aln_matrix_left = np.pad(aln_matrix_left, ((0, len(aln_matrix_right) - len(aln_matrix_left)), (0, 0)), 'constant', constant_values=(-1, -1))
+    return aln_matrix_left, aln_matrix_right
+
+
+# aux_dict keys that hold one value per read (parallel to matrix rows); everything else is a
+# sparse list of row indices and needs remapping when rows are filtered.
+_PER_ROW_AUX_KEYS = {'name', 'haplotag_idx'}
+
+
+def _subset_aux_dict(aux_dict, mask):
+    """ Restrict aux_dict to rows selected by `mask` (boolean array over the original matrix rows).
+    Per-row lists are sliced; index-list keys are remapped to the new positions and pruned.
+    """
+    kept = np.where(mask)[0]
+    remap = {old: new for new, old in enumerate(kept)}
+    out = {}
+    for key, values in aux_dict.items():
+        if key in _PER_ROW_AUX_KEYS:
+            out[key] = [values[i] for i in kept]
+        else:
+            out[key] = [remap[i] for i in values if i in remap]
+    return out
+
+
+def _build_side_band(aln, aux, mask, band_h, side_tag, gap_after, global_offset):
+    """Slice rows by `mask`, pad up to `band_h` with -1 rows, append `gap_after` trailing
+    gap rows (all -1). Returns (band_matrix, name_list, hp_list, old_to_new_index).
+    Padding/gap rows receive unique sentinel names like `__pad_{side_tag}_{global_row}`
+    so the read-connection name merge cannot accidentally pair them.
+    """
+    kept = np.where(mask)[0]
+    n_real = len(kept)
+    width = aln.shape[1]
+    pad_rows = band_h - n_real
+    total_rows = band_h + gap_after
+
+    band = np.full((total_rows, width), -1, dtype=aln.dtype)
+    if n_real > 0:
+        band[:n_real] = aln[mask]
+
+    names = []
+    hps = []
+    old_to_new = {}
+    for new_local, old in enumerate(kept):
+        old_to_new[int(old)] = global_offset + new_local
+        names.append(aux['name'][int(old)])
+        hps.append(aux['haplotag_idx'][int(old)])
+    for j in range(pad_rows + gap_after):
+        row_pos = global_offset + n_real + j
+        names.append(f'__pad_{side_tag}_{row_pos}')
+        hps.append(-1)
+
+    return band, names, hps, old_to_new
+
+
+def _assemble_reordered_aux(template_aux, names, hps, old_to_new):
+    """Build a reordered aux_dict matching the layout produced by _build_side_band concatenation.
+    Index-list keys are remapped via `old_to_new` (entries outside the map are dropped);
+    per-row keys come from the assembled `names`/`hps` lists.
+    """
+    out = {}
+    for key, values in template_aux.items():
+        if key == 'name':
+            out[key] = names
+        elif key == 'haplotag_idx':
+            out[key] = hps
+        else:
+            out[key] = [old_to_new[i] for i in values if i in old_to_new]
+    return out
+
+
+def reorder_by_hp(aln_matrix_left, aux_dict_left,
+                  aln_matrix_right=None, aux_dict_right=None, gap=3):
+    """Reorder rows of one or two alignment matrices so they're grouped by HP tag
+    (order: HP1, HP2, untagged=-1) with `gap` all-`-1` rows between groups.
+
+    Both sides end up with identical total row count. The side with fewer reads in a band
+    is padded with `-1` rows. aux_dict index-list keys (split_idx, low_mapq_idx, etc.) are
+    remapped to the new row positions; per-row lists (name, haplotag_idx) are rebuilt with
+    sentinel entries at padding/gap rows.
+
+    Returns (aln_left_new, aux_left_new, aln_right_new, aux_right_new, bands), where
+    `bands` is a list of (hp_value, y_center, n_reads_total). When `aln_matrix_right is None`,
+    the right entries are returned as `None` and `n_reads_total == n_left`.
+    """
+    hp_left = np.array(aux_dict_left['haplotag_idx'])
+    has_right = aln_matrix_right is not None
+    hp_right = np.array(aux_dict_right['haplotag_idx']) if has_right else None
+
+    groups = []
+    for hp in (1, 2, -1):
+        mask_l = hp_left == hp
+        n_l = int(mask_l.sum())
+        if has_right:
+            mask_r = hp_right == hp
+            n_r = int(mask_r.sum())
+        else:
+            mask_r = None
+            n_r = 0
+        if n_l == 0 and n_r == 0:
+            continue
+        groups.append((hp, mask_l, n_l, mask_r, n_r))
+
+    left_bands, left_names, left_hps = [], [], []
+    right_bands, right_names, right_hps = [], [], []
+    left_remap, right_remap = {}, {}
+    bands_info = []
+
+    offset = 0
+    for idx, (hp, mask_l, n_l, mask_r, n_r) in enumerate(groups):
+        band_h = max(n_l, n_r) if has_right else n_l
+        gap_after = gap if idx < len(groups) - 1 else 0
+
+        l_band, l_names, l_hps, l_map = _build_side_band(
+            aln_matrix_left, aux_dict_left, mask_l, band_h, 'l', gap_after, offset)
+        left_bands.append(l_band); left_names.extend(l_names); left_hps.extend(l_hps)
+        left_remap.update(l_map)
+
+        if has_right:
+            r_band, r_names, r_hps, r_map = _build_side_band(
+                aln_matrix_right, aux_dict_right, mask_r, band_h, 'r', gap_after, offset)
+            right_bands.append(r_band); right_names.extend(r_names); right_hps.extend(r_hps)
+            right_remap.update(r_map)
+
+        bands_info.append((hp, offset + band_h / 2 - 0.5, (n_l + n_r) if has_right else n_l))
+        offset += band_h + gap_after
+
+    aln_left_new = np.concatenate(left_bands, axis=0)
+    aux_left_new = _assemble_reordered_aux(aux_dict_left, left_names, left_hps, left_remap)
+
+    if has_right:
+        aln_right_new = np.concatenate(right_bands, axis=0)
+        aux_right_new = _assemble_reordered_aux(aux_dict_right, right_names, right_hps, right_remap)
+    else:
+        aln_right_new = None
+        aux_right_new = None
+
+    return aln_left_new, aux_left_new, aln_right_new, aux_right_new, bands_info
+
+
+def infer_technology(bam_filename, n=500):
+    """ Infers the sequencing technology from the first `n` primary alignments of a BAM.
+    Short-read libraries have uniform read lengths of a few hundred bp at most, while
+    long reads span kilobases, so a median read length above 500 bp classifies the
+    sample as long-read. Returns 'ill' (short-read) or 'pb' (long-read). """
+    lengths = []
+    with pysam.AlignmentFile(bam_filename) as bam:
+        for read in bam.fetch(until_eof=True):
+            if read.is_unmapped or read.is_secondary or read.is_supplementary:
+                continue
+            length = read.infer_read_length() or read.query_length
+            if length:
+                lengths.append(length)
+            if len(lengths) >= n:
+                break
+    if not lengths:
+        raise ValueError(
+            f"cannot infer sequencing technology for '{bam_filename}': no mapped reads found"
+        )
+    return 'pb' if float(np.median(lengths)) > 500 else 'ill'
+
+
+def compute_cov_df(bam_filename, chrom, start, stop, minq=20):
+    """ Computes coverage for given region. Coverage is computed twice. Once for all reads and once for reads with
+    mapping quality >= minq. """
+    cov = pd.DataFrame([x.split('\t') for x in pysam.depth(bam_filename, '-r', chrom + ':' + str(start) + '-' + str(stop), '-a').split('\n')[:-1]])
+    cov_minq = pd.DataFrame([x.split('\t') for x in pysam.depth(bam_filename, '-r', chrom + ':' + str(start) + '-' + str(stop), '-a', '-Q', str(minq)).split('\n')[:-1]])
+    if cov.empty or cov_minq.empty:
+        raise ValueError(f"No coverage data returned for {chrom} from BAM file '{bam_filename}'. Make sure the BAM file is indexed and that '{chrom}' exists in its header.")
+    cov[1] = cov[1].astype(int)
+    cov[2] = cov[2].astype(int)
+    cov[1] = cov[1] - cov.loc[0, 1]
+    cov_minq[1] = cov_minq[1].astype(int)
+    cov_minq[2] = cov_minq[2].astype(int)
+    cov_minq[1] = cov_minq[1] - cov_minq.loc[0, 1]
+
+    return cov, cov_minq
+
+
+def compute_rep_df(rep_df, chrom, start, stop, padding=500):
+    """ Computes repeat overlap for a given region. """
+    rep_df = rep_df[(rep_df['genoName'] == chrom) & (rep_df['genoStart'] >= start - padding) & (rep_df['genoEnd'] <= stop + padding)].copy()
+    rep_df['genoStart'] = rep_df['genoStart'] - start + padding
+    rep_df['genoEnd'] = rep_df['genoEnd'] - start + padding
+    rep_df = rep_df[(rep_df['genoEnd'] > 0) & (rep_df['genoStart'] < stop - start + (2*padding))]
+    rep_df.reset_index(drop=True, inplace=True)
+    return rep_df
+
+def add_comma_to_pos(pos):
+    """ Adds comma to position. """
+    pos = str(int(pos))
+    if len(pos) < 4:
+        return pos
+    newstr = ''
+    for i in range(len(pos)):
+        newstr = pos[::-1][i] + newstr
+        if i % 3 == 2:
+            newstr = ',' + newstr
+    
+    if newstr[0] == ',':
+        newstr = newstr[1:]
+    return newstr
+
+
+def compute_baseline_cov(bam_filename: str, chrom: str, n: int=1000, s: int=1000) -> float:
+    """ Computes baseline coverage for a given chromosome.
+
+    Args:
+        bam_filename (str): Filename of BAM file
+        chrom (str): Chromosome
+        n (int, optional): Number of regions to sample. Defaults to 1000.
+        s (int, optional): Size of each sampled region. Defaults to 1000.
+
+    Returns:
+        float: Median coverage across sampled regions
+    """    
+    
+    # Open BAM file
+    bam = pysam.AlignmentFile(bam_filename, 'rb')
+    
+    # Get chromosome index to get chromosome length
+    if chrom == 'chrX':
+        chrom_idx = 22
+    elif chrom == 'chrY':
+        chrom_idx = 23
+    elif chrom == 'chrM':
+        chrom_idx = 24
+    else:
+        chrom_idx = int(chrom[3:]) - 1
+
+    if len(bam.lengths) > 1:
+        if chrom_idx < 0 or chrom_idx >= len(bam.lengths):
+            raise ValueError(f"Chromosome '{chrom}' not found in BAM file '{bam_filename}' header (index {chrom_idx} out of range for {len(bam.lengths)} contigs).")
+        chrom_len = bam.lengths[chrom_idx]
+    else:
+        chrom_len = bam.lengths[0]
+
+    rng = np.random.RandomState(42)
+    baseline_coverage_mean = []
+    for i in range(n):
+        start = rng.randint(0, chrom_len)
+        stop = start + s
+        
+        coverage = [0] * (stop - start + 1)
+        for pileupcolumn in bam.pileup(chrom, start, stop, min_mapping_quality=20, flag_filter=1540, stepper='samtools', ignore_orphans=False, ignore_overlaps=False):
+            if start <= pileupcolumn.pos <= stop:
+                coverage[pileupcolumn.pos - start] = pileupcolumn.nsegments
+        
+        baseline_coverage_mean.append(np.mean(coverage))
+        
+    return np.median(baseline_coverage_mean)
+
+
+def compute_isize_orientation_dict(bam_filename: str, chrom: str, start: int, end: int, thr_min: int=50, thr_max: int=1000) -> dict:
+    """ Computes insert size distribution for a given region.
+
+    Args:
+        bam_filename (str): Filename of BAM file
+        chrom (str): Chromosome
+        start (int): Start position
+        end (int): End position
+        thr_min (int, optional): Lower threshold for insert size. Defaults to 50.
+        thr_max (int, optional): Upper threshold for insert size. Defaults to 1000.
+
+    Returns:
+        dict: List of low, high positions 
+    """    
+    
+    # Open BAM file
+    bam = pysam.AlignmentFile(bam_filename, 'rb')
+    
+    positions_exceed_min = []
+    positions_exceed_max = []
+    positions_rr = []
+    positions_ff = []
+    positions_rf = []
+    positions_tx = []
+
+    # Extract positions and insert sizes for the specified region
+    for read in bam.fetch(chrom, start, end):
+        if not read.is_unmapped:
+            
+            # Insert Size
+            if abs(read.template_length) > thr_max:
+                positions_exceed_max.append(read.reference_start)
+                
+            elif abs(read.template_length) < thr_min:
+                positions_exceed_min.append(read.reference_start)
+                
+            # Orientation TX
+            if read.reference_id != read.next_reference_id:
+                positions_tx.append(read.reference_start)
+            
+            # Orientation RR
+            elif read.is_reverse and read.mate_is_reverse:
+                positions_rr.append(read.reference_start)
+            
+            # Orientation FF
+            elif not read.is_reverse and not read.mate_is_reverse:
+                positions_ff.append(read.reference_start)
+            
+            # Orientation RF
+            elif not read.is_reverse and read.mate_is_reverse and read.template_length < 0:
+                positions_rf.append(read.reference_start)
+                
+            elif read.is_reverse and not read.mate_is_reverse and read.template_length > 0:
+                positions_rf.append(read.reference_start)
+                
+    positions_exceed_min = np.array(positions_exceed_min) - start
+    positions_exceed_max = np.array(positions_exceed_max) - start
+    positions_rr = np.array(positions_rr) - start
+    positions_ff = np.array(positions_ff) - start
+    positions_rf = np.array(positions_rf) - start
+    positions_tx = np.array(positions_tx) - start
+    
+    return {'exceed_min': positions_exceed_min, 'exceed_max': positions_exceed_max, 'rr': positions_rr, 'ff': positions_ff, 'rf': positions_rf, 'tx': positions_tx}

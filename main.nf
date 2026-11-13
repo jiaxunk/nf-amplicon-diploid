@@ -151,6 +151,10 @@ workflow {
         ch_versions
     )
 
+    ch_repeats = params.cuban_repeats
+        ? Channel.fromPath(params.cuban_repeats, checkIfExists: true)
+        : Channel.value([])
+
     if (params.snp) {
         ch_snp = ch_results
             .combine(ch_reference)
@@ -159,16 +163,104 @@ workflow {
                 [meta, bam, bai, ref, fai, target, report_data]
             }
         call_clair3(ch_snp)
+
         if (params.phased) {
             phase_snp(call_clair3.out.calls)
-            make_haplotype_consensus(phase_snp.out.consensus_inputs)
-            ch_snp_reports = phase_snp.out.report_dirs.map { meta, report_dir -> report_dir }.collect()
+            ch_raw_consensus_inputs = phase_snp.out.consensus_inputs
+            ch_raw_snp_reports = phase_snp.out.report_dirs
+            ch_sniffles_bam = phase_snp.out.consensus_inputs.map { meta, bam, ref, target, vcf, tbi, rep ->
+                [meta, bam, file("${bam}.bai"), true]
+            }
         } else {
-            make_haplotype_consensus(call_clair3.out.calls)
-            ch_snp_reports = call_clair3.out.report_dirs.map { meta, report_dir -> report_dir }.collect()
+            ch_raw_consensus_inputs = call_clair3.out.calls
+            ch_raw_snp_reports = call_clair3.out.report_dirs
+            ch_sniffles_bam = ch_results.map { meta, bam, bai, report_data ->
+                [meta, bam, bai, false]
+            }
         }
+
+        if (params.sv) {
+            ch_sniffles_in = ch_sniffles_bam
+                .combine(ch_reference)
+                .map { meta, bam, bai, is_phased, ref, mmi, fai ->
+                    [meta, bam, bai, ref, fai, is_phased]
+                }
+            call_sniffles(ch_sniffles_in)
+
+            ch_filter_in = call_sniffles.out.raw_calls
+                .combine(ch_target)
+                .map { meta, raw_vcf, raw_tbi, target ->
+                    [meta, raw_vcf, raw_tbi, target]
+                }
+            filter_sv_calls(ch_filter_in)
+
+            ch_refine_in = ch_raw_consensus_inputs
+                .map { meta, bam, ref, target, vcf, tbi, rep ->
+                    [meta, bam, file("${bam}.bai"), ref, target, vcf, tbi]
+                }
+                .join(filter_sv_calls.out.filtered.map { meta, sv_vcf, sv_tbi, sv_tsv -> [meta, sv_vcf, sv_tbi] })
+            refine_snp_zygosity(ch_refine_in)
+
+            make_haplotype_consensus(refine_snp_zygosity.out.consensus_inputs)
+            ch_snp_reports = refine_snp_zygosity.out.report_dirs.map { meta, dir -> dir }.collect()
+
+            ch_cuban_in = ch_sniffles_bam
+                .map { meta, bam, bai, is_phased -> [meta, bam, bai] }
+                .join(filter_sv_calls.out.filtered)
+                .join(ch_results.map { meta, bam, bai, rep -> [meta, rep] })
+                .combine(ch_reference)
+                .map { meta, bam, bai, sv_vcf, sv_tbi, sv_tsv, rep, ref, mmi, fai ->
+                    [meta, bam, bai, sv_vcf, sv_tbi, sv_tsv, ref, fai, rep]
+                }
+            plot_cuban(ch_cuban_in, ch_repeats)
+
+            ch_sv_reports = plot_cuban.out.report_dir.map { meta, dir -> dir }.collect()
+            make_sv_report(
+                ch_sv_reports,
+                ch_params,
+                ch_versions
+            )
+        } else {
+            make_haplotype_consensus(ch_raw_consensus_inputs)
+            ch_snp_reports = ch_raw_snp_reports.map { meta, dir -> dir }.collect()
+        }
+
         make_snp_report(
             ch_snp_reports,
+            ch_params,
+            ch_versions
+        )
+    } else if (params.sv) {
+        ch_sniffles_bam = ch_results.map { meta, bam, bai, report_data ->
+            [meta, bam, bai, false]
+        }
+        ch_sniffles_in = ch_sniffles_bam
+            .combine(ch_reference)
+            .map { meta, bam, bai, is_phased, ref, mmi, fai ->
+                [meta, bam, bai, ref, fai, is_phased]
+            }
+        call_sniffles(ch_sniffles_in)
+
+        ch_filter_in = call_sniffles.out.raw_calls
+            .combine(ch_target)
+            .map { meta, raw_vcf, raw_tbi, target ->
+                [meta, raw_vcf, raw_tbi, target]
+            }
+        filter_sv_calls(ch_filter_in)
+
+        ch_cuban_in = ch_sniffles_bam
+            .map { meta, bam, bai, is_phased -> [meta, bam, bai] }
+            .join(filter_sv_calls.out.filtered)
+            .join(ch_results.map { meta, bam, bai, rep -> [meta, rep] })
+            .combine(ch_reference)
+            .map { meta, bam, bai, sv_vcf, sv_tbi, sv_tsv, rep, ref, mmi, fai ->
+                [meta, bam, bai, sv_vcf, sv_tbi, sv_tsv, ref, fai, rep]
+            }
+        plot_cuban(ch_cuban_in, ch_repeats)
+
+        ch_sv_reports = plot_cuban.out.report_dir.map { meta, dir -> dir }.collect()
+        make_sv_report(
+            ch_sv_reports,
             ch_params,
             ch_versions
         )
@@ -436,6 +528,8 @@ process software_versions {
         echo "fastcat,\$(fastcat --version 2>&1 | head -n 1)"
         if command -v porechop >/dev/null 2>&1; then echo "porechop,\$(porechop --version 2>&1 | head -n 1)"; fi
         if command -v dorado >/dev/null 2>&1; then echo "dorado,\$(dorado --version 2>&1 | head -n 1)"; fi
+        echo "sniffles,2.6.3"
+        echo "cuban,0.1.0"
     } > versions.txt
     """
 }
@@ -471,8 +565,8 @@ process call_clair3 {
     label 'wf_human_snp'
     cpus 8
     memory '16 GB'
-    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_snp.vcf.gz*', enabled: !params.phased
-    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: 'variants.tsv', enabled: !params.phased
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_snp.vcf.gz*', enabled: !params.phased && !params.sv
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: 'variants.tsv', enabled: !params.phased && !params.sv
     input:
         tuple val(meta), path(bam), path(bai), path(reference), path(reference_fai), path(target_bed), path(report_data)
     output:
@@ -527,8 +621,9 @@ process phase_snp {
     label 'wf_human_snp'
     cpus 4
     memory '8 GB'
-    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_snp*'
-    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: 'variants.tsv'
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_snp.vcf.gz*', enabled: !params.sv
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: 'variants.tsv', enabled: !params.sv
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.haploblocks.gtf'
     publishDir "${params.out_dir}/${meta.alias}/alignments", mode: 'copy', pattern: '*.haplotagged.bam*'
     input:
         tuple val(meta), path(bam), path(reference), path(target_bed), path(vcf), path(vcf_index), path(report_dir, stageAs: 'clair3-report')
@@ -618,6 +713,154 @@ process make_snp_report {
     """
     workflow-glue report_snp \\
         --report-fname nf-amplicon-snp-report.html \\
+        --data . \\
+        --versions '$versions' \\
+        --params '$params_json' \\
+        --wf-version '${workflow.manifest.version}'
+    """
+}
+
+process call_sniffles {
+    label 'wf_human_sv'
+    cpus 4
+    memory '8 GB'
+    input:
+        tuple val(meta), path(bam), path(bai), path(reference), path(reference_fai), val(is_phased)
+    output:
+        tuple val(meta), path('raw_sv.vcf.gz'), path('raw_sv.vcf.gz.tbi'), emit: raw_calls
+    script:
+    def phase_arg = is_phased ? '--phase' : ''
+    def extra = params.sniffles_extra_args ?: ''
+    """
+    samtools faidx '$reference'
+    samtools index '$bam'
+    sniffles \\
+        --input '$bam' \\
+        --vcf raw_sv.vcf.gz \\
+        --reference '$reference' \\
+        --minsvlen ${params.min_sv_length} \\
+        --threads $task.cpus \\
+        $phase_arg \\
+        $extra
+    tabix -f -p vcf raw_sv.vcf.gz
+    """
+}
+
+process filter_sv_calls {
+    label 'wfamplicon'
+    cpus 1
+    memory '2 GB'
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_sv*'
+    input:
+        tuple val(meta), path(raw_vcf), path(raw_vcf_index), path(target_bed)
+    output:
+        tuple val(meta), path("${meta.alias}.nf_sv.vcf.gz"), path("${meta.alias}.nf_sv.vcf.gz.tbi"), path("${meta.alias}.nf_sv.tsv"), emit: filtered
+    script:
+    """
+    workflow-glue filter_sv_calls \\
+        --vcf '$raw_vcf' \\
+        --target '$target_bed' \\
+        --min-support ${params.min_sv_support} \\
+        --min-vaf ${params.min_sv_vaf} \\
+        -o '${meta.alias}.nf_sv.vcf.gz' \\
+        --output-tsv '${meta.alias}.nf_sv.tsv'
+    """
+}
+
+process refine_snp_zygosity {
+    label 'wf_human_snp'
+    cpus 2
+    memory '4 GB'
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: '*.nf_snp*'
+    publishDir "${params.out_dir}/${meta.alias}/variants", mode: 'copy', pattern: 'variants.tsv'
+    input:
+        tuple val(meta), path(bam), path(bai), path(reference), path(target_bed), path(snp_vcf), path(snp_vcf_index), path(sv_vcf), path(sv_vcf_index)
+    output:
+        tuple val(meta), path(bam), path(reference), path(target_bed), path("${meta.alias}.nf_snp.vcf.gz"), path("${meta.alias}.nf_snp.vcf.gz.tbi"), path("${meta.alias}"), emit: consensus_inputs
+        tuple val(meta), path("${meta.alias}"), emit: report_dirs
+        tuple val(meta), path("${meta.alias}.nf_snp*"), emit: snp_vcf
+        tuple val(meta), path("variants.tsv"), emit: variants_tsv
+    script:
+    """
+    samtools faidx '$reference'
+    samtools index '$bam'
+    export PYTHONPATH=/opt/custflow/epi2meuser/conda/bin
+    python3 /opt/custflow/epi2meuser/conda/bin/postprocess/SwitchZygosityBasedOnSVCalls.py \\
+        --bam_fn '$bam' \\
+        --clair3_vcf_input '$snp_vcf' \\
+        --sv_vcf_input '$sv_vcf' \\
+        --sv_filter_tag PASS,GT \\
+        --vcf_output refined.vcf \\
+        --threads $task.cpus
+
+    cp refined.vcf.gz '${meta.alias}.nf_snp.vcf.gz'
+    cp refined.vcf.gz.tbi '${meta.alias}.nf_snp.vcf.gz.tbi'
+    mkdir -p '${meta.alias}'
+    workflow-glue extract_snp_data \\
+        --bam '$bam' \\
+        --vcf '${meta.alias}.nf_snp.vcf.gz' \\
+        --target '$target_bed' \\
+        --out-dir '${meta.alias}'
+    cp '${meta.alias}/variants.tsv' 'variants.tsv'
+    """
+}
+
+process plot_cuban {
+    label 'wfamplicon'
+    cpus 2
+    memory '4 GB'
+    publishDir "${params.out_dir}/${meta.alias}", mode: 'copy', pattern: 'sv_plots/*'
+    input:
+        tuple val(meta), path(bam), path(bai), path(sv_vcf), path(sv_vcf_index), path(sv_tsv), path(reference), path(reference_fai), path(report_data)
+        path repeats_bed
+    output:
+        tuple val(meta), path("${meta.alias}"), emit: report_dir
+        tuple val(meta), path("${meta.alias}/sv_plots/*.png"), optional: true, emit: plots
+    script:
+    def repeats_arg = params.cuban_repeats ? "--repeats '$repeats_bed'" : "--no-repeats"
+    def padding_arg = params.cuban_padding ? "--padding ${params.cuban_padding}" : ""
+    def extra = params.cuban_extra_args ?: ""
+    """
+    mkdir -p '${meta.alias}/variants' '${meta.alias}/sv_plots'
+    cp '$sv_vcf' '${meta.alias}/variants/${meta.alias}.nf_sv.vcf.gz'
+    cp '$sv_vcf_index' '${meta.alias}/variants/${meta.alias}.nf_sv.vcf.gz.tbi'
+    cp '$sv_tsv' '${meta.alias}/variants/${meta.alias}.nf_sv.tsv'
+
+    cov=\$(awk '\$1=="total_region" { if (\$4 > 0.1) print \$4; else print "20.0"; exit }' '$report_data/target.mosdepth.summary.txt' 2>/dev/null || echo "20.0")
+    if [ -z "\$cov" ]; then cov="20.0"; fi
+
+    n_vars=\$(zgrep -v '^#' '$sv_vcf' | wc -l || echo 0)
+    if [ "\$n_vars" -gt 0 ]; then
+        cuban \\
+            --vcf '$sv_vcf' \\
+            --sample '${meta.alias}:$bam' \\
+            --tech '${meta.alias}:lr' \\
+            --baseline-cov "${meta.alias}:\$cov" \\
+            --ref '$reference' \\
+            --outdir '${meta.alias}/sv_plots' \\
+            --window ${params.cuban_window} \\
+            $padding_arg \\
+            $repeats_arg \\
+            $extra
+    fi
+    """
+}
+
+process make_sv_report {
+    label 'wf_common'
+    cpus 1
+    memory '4 GB'
+    publishDir params.out_dir, mode: 'copy', pattern: 'nf-amplicon-sv-report.html'
+    input:
+        path sample_reports
+        path params_json
+        path versions
+    output:
+        path 'nf-amplicon-sv-report.html'
+    script:
+    """
+    workflow-glue report_sv \\
+        --report-fname nf-amplicon-sv-report.html \\
         --data . \\
         --versions '$versions' \\
         --params '$params_json' \\

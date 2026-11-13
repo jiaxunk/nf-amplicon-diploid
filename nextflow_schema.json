@@ -301,6 +301,14 @@
           "description": "Additional arguments passed to Clair3.",
           "help_text": "These arguments are appended verbatim to the `run_clair3.sh` command."
         },
+        "min_sv_length": {
+          "type": "integer",
+          "default": 30,
+          "minimum": 1,
+          "title": "Minimum SV length",
+          "description": "Minimum length (bp) required for Sniffles2 structural variant calls.",
+          "help_text": "Passed to Sniffles2 as --minsvlen."
+        },
         "min_sv_support": {
           "type": "integer",
           "default": 5,
@@ -330,6 +338,19 @@
           "title": "CUBAN repeats BED",
           "description": "BED file of tandem repeat coordinates for CUBAN SV annotation.",
           "help_text": "Optional. When provided, CUBAN uses this repeat annotation to refine structural variant calls within tandem repeat regions."
+        },
+        "cuban_padding": {
+          "type": "integer",
+          "title": "CUBAN plot padding",
+          "description": "Optional padding in bp around SV breakpoints for CUBAN plots.",
+          "help_text": "Passed to CUBAN as --padding."
+        },
+        "cuban_window": {
+          "type": "integer",
+          "default": 100,
+          "title": "CUBAN coverage window size",
+          "description": "Window size for CUBAN depth and coverage calculation.",
+          "help_text": "Passed to CUBAN as --window."
         },
         "cuban_extra_args": {
           "type": "string",
