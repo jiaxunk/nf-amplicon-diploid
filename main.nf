@@ -809,7 +809,7 @@ process plot_cuban {
     label 'wfamplicon'
     cpus 2
     memory '4 GB'
-    publishDir "${params.out_dir}/${meta.alias}", mode: 'copy', pattern: 'sv_plots/*'
+    publishDir "${params.out_dir}/${meta.alias}/sv_plots", mode: 'copy', pattern: "${meta.alias}/sv_plots/*.png", saveAs: { fn -> file(fn).name }
     input:
         tuple val(meta), path(bam), path(bai), path(sv_vcf), path(sv_vcf_index), path(sv_tsv), path(reference), path(reference_fai), path(report_data)
         path repeats_bed
