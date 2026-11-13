@@ -101,13 +101,6 @@
           "description": "Remap already-aligned BAMs even when their headers match the reference.",
           "help_text": "By default, BAM files whose headers indicate they were aligned to the supplied reference are passed directly to downstream steps. Enable this option to force FASTQ conversion and remapping regardless."
         },
-        "disable_ping": {
-          "type": "boolean",
-          "default": false,
-          "title": "Disable telemetry ping",
-          "description": "Prevent the workflow from sending an anonymous usage ping.",
-          "help_text": "The workflow sends a single anonymous ping to Oxford Nanopore Technologies on startup. Enable this option to suppress it."
-        },
         "combine_results": {
           "type": "boolean",
           "default": false,
@@ -274,8 +267,15 @@
           "type": "boolean",
           "default": true,
           "title": "Phase variants",
-          "description": "Phase SNP calls and produce haplotype-resolved consensus sequences.",
-          "help_text": "When enabled, WhatsHap is used to phase Clair3 SNP calls and tag reads to haplotypes. Phased BAMs and haplotype-aware consensus FASTA files are published."
+          "description": "Phase SNP calls and haplotag aligned reads.",
+          "help_text": "When enabled, WhatsHap is used to phase Clair3 SNP calls and tag reads to haplotypes. Phased BAMs and phased VCFs are published. When --consensus is also enabled, emits haplotype-resolved consensus FASTA files."
+        },
+        "consensus": {
+          "type": "boolean",
+          "default": false,
+          "title": "Generate consensus sequences",
+          "description": "Generate reference-based consensus FASTA sequences.",
+          "help_text": "When enabled in reference mode, generates diploid haplotype consensus (or unphased consensus) FASTA files with low-depth N-masking for each target region. Disabled by default."
         },
         "override_basecaller_cfg": {
           "type": "string",

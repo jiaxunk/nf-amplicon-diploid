@@ -2,7 +2,6 @@
 
 nextflow.enable.dsl = 2
 
-import Pinguscript
 import WorkflowMain
 
 include { fastq_ingress; xam_ingress } from './lib/ingress'
@@ -10,7 +9,6 @@ include { getParams } from './lib/common'
 
 workflow {
     WorkflowMain.initialise(workflow, params, log)
-    Pinguscript.ping_start(nextflow, workflow, params)
 
     if (params.analysis_mode != 'reference') {
         error "Ticket 01 implements reference alignment; '${params.analysis_mode}' mode is not available yet."
@@ -59,6 +57,7 @@ workflow {
             sample_sheet: params.sample_sheet,
             analyse_unclassified: params.analyse_unclassified,
             analyse_fail: params.analyse_fail,
+            keep_unaligned: true,
             stats: true,
             per_read_stats: true,
             allow_multiple_basecall_models: true,
@@ -73,26 +72,8 @@ workflow {
             remap: true
         }
 
-        ch_bam_fastq = xam_ingress([
-            input: params.bam,
-            sample: params.sample,
-            sample_sheet: params.sample_sheet,
-            analyse_unclassified: params.analyse_unclassified,
-            analyse_fail: params.analyse_fail,
-            keep_unaligned: true,
-            return_fastq: true,
-            stats: true,
-            per_read_stats: true,
-            allow_multiple_basecall_models: true,
-        ])
-        ch_remap_aliases = ch_bam_routes.remap.map { meta, bam, bai, stats, match -> meta.alias }.collect()
-        ch_fastq = ch_bam_fastq
-            .combine(ch_remap_aliases)
-            .filter { meta, reads, stats, remap_aliases ->
-                meta.is_unaligned || meta.alias in remap_aliases
-            }
-            .map { meta, reads, stats, remap_aliases -> [meta, reads, stats] }
-            | filter_downsample
+        bam_to_fastq(ch_bam_routes.remap)
+        ch_fastq = bam_to_fastq.out | filter_downsample
         ch_already_aligned = ch_bam_routes.already_aligned
             .map { meta, bam, bai, stats, match -> [meta, bam, bai] }
     }
@@ -201,7 +182,9 @@ workflow {
                 .join(filter_sv_calls.out.filtered.map { meta, sv_vcf, sv_tbi, sv_tsv -> [meta, sv_vcf, sv_tbi] })
             refine_snp_zygosity(ch_refine_in)
 
-            make_haplotype_consensus(refine_snp_zygosity.out.consensus_inputs)
+            if (params.consensus) {
+                make_haplotype_consensus(refine_snp_zygosity.out.consensus_inputs)
+            }
             ch_snp_reports = refine_snp_zygosity.out.report_dirs.map { meta, dir -> dir }.collect()
 
             ch_cuban_in = ch_sniffles_bam
@@ -221,7 +204,9 @@ workflow {
                 ch_versions
             )
         } else {
-            make_haplotype_consensus(ch_raw_consensus_inputs)
+            if (params.consensus) {
+                make_haplotype_consensus(ch_raw_consensus_inputs)
+            }
             ch_snp_reports = ch_raw_snp_reports.map { meta, dir -> dir }.collect()
         }
 
@@ -265,13 +250,6 @@ workflow {
             ch_versions
         )
     }
-}
-
-workflow.onComplete {
-    Pinguscript.ping_complete(nextflow, workflow, params)
-}
-workflow.onError {
-    Pinguscript.ping_error(nextflow, workflow, params)
 }
 
 process build_reference {
@@ -365,6 +343,20 @@ process classify_aligned_bam {
         cat check-ref.log >&2
         exit "\$status"
     fi
+    """
+}
+
+process bam_to_fastq {
+    label 'wfamplicon'
+    cpus 2
+    memory '2 GB'
+    input:
+        tuple val(meta), path(bam), path(bai), path(stats), val(match)
+    output:
+        tuple val(meta), path('reads.fastq.gz'), path(stats)
+    script:
+    """
+    samtools fastq -@ $task.cpus -T '*' '$bam' | gzip -c > reads.fastq.gz
     """
 }
 
