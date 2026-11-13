@@ -1,4 +1,4 @@
-"""Select a contig if multiple were created, do some QC, modify depth / stats files."""
+"""Select contig(s) if multiple were created, do some QC, modify depth / stats files."""
 from pathlib import Path
 import sys
 
@@ -10,7 +10,7 @@ from .util import get_named_logger, wf_parser  # noqa: ABS101
 
 def main(args):
     """Run the entry point."""
-    logger = get_named_logger("mostCovRef")
+    logger = get_named_logger("trim_and_qc")
 
     logger.info("Read input files.")
 
@@ -26,15 +26,14 @@ def main(args):
     # make sure we got the same seq IDs in flagstat and the FASTQ file
     seq_ids = [x for x in flagstat.index if x != "*"]
     if set(fastq.keys()) != set(seq_ids):
-        ValueError("Sequence IDs in FASTQ and in flagstat file don't agree.")
+        logger.warning("Sequence IDs in FASTQ and in flagstat file don't agree.")
 
     # if all reads in the BAM are unmapped, `mosdepth` annoyingly outputs an empty
     # per-base depth file; we need to account for that
     if depths.empty:
         mean_depths = pd.Series(0, index=seq_ids)
     else:
-        # we got a valid depth file; calculate the mean depths of the candidate
-        # consensus contigs
+        # calculate the mean depths of the candidate consensus contigs
         mean_depths = depths.groupby("ref").apply(
             lambda df: df.eval("(end - start) * depth").sum() / df["end"].iloc[-1]
         )
@@ -54,14 +53,20 @@ def main(args):
         ]
     )
     qc_stats.index.name = "contig"
-    for contig, mean_depth in mean_depths.items():
+    for contig in seq_ids:
+        mean_depth = mean_depths.get(contig, 0.0)
         status = "passed"
-        contig_len = len(fastq[contig].sequence)
+        contig_len = len(fastq[contig].sequence) if contig in fastq else 0
         fail_reasons = []
         if mean_depth < args.minimum_depth:
             status = "failed"
             fail_reasons.append("low depth")
-        primary_ratio = flagstat.loc[contig, "primary"] / flagstat.loc[contig, "total"]
+        primary = flagstat.loc[contig, "primary"] if contig in flagstat.index else 0
+        total = flagstat.loc[contig, "total"] if contig in flagstat.index else 0
+        secondary = flagstat.loc[contig, "secondary"] if contig in flagstat.index else 0
+        supplementary = flagstat.loc[contig, "supplementary"] if contig in flagstat.index else 0
+        primary_ratio = (primary / total) if total > 0 else 0.0
+
         if primary_ratio < args.primary_threshold:
             status = "failed"
             fail_reasons.append("low primary ratio")
@@ -69,20 +74,21 @@ def main(args):
         qc_stats.loc[contig] = [
             args.asm_method,
             contig_len,
-            round(mean_depth, 3),
-            *flagstat.loc[contig, ["primary", "secondary", "supplementary"]],
-            round(primary_ratio, 3),
+            round(float(mean_depth), 3),
+            primary,
+            secondary,
+            supplementary,
+            round(float(primary_ratio), 3),
             status,
             ", ".join(fail_reasons),
         ]
 
     qc_passed = qc_stats.query("status == 'passed'")
-
     failed = qc_passed.empty
 
     # create the output directory
     outdir = Path(args.outdir_fail if failed else args.outdir_pass)
-    outdir.mkdir()
+    outdir.mkdir(parents=True, exist_ok=True)
 
     qc_stats.to_csv(outdir / args.qc_summary_tsv, sep="\t")
 
@@ -91,50 +97,56 @@ def main(args):
             "Consensus generation failed for this sample. No consensus candidate "
             "passed the quality checks."
         )
-        sys.exit()
+        sys.exit(0)
 
-    # select the contig with the largest mean depth
-    selected = qc_passed["mean_depth"].sort_values(ascending=False).index[0]
+    # select up to max_contigs contigs with the largest mean depth
+    max_c = args.max_contigs if args.max_contigs is not None else 2
+    selected_contigs = (
+        qc_passed["mean_depth"].sort_values(ascending=False).index[:max_c].tolist()
+    )
     logger.info(
-        f"Selected contig '{selected}'. "
+        f"Selected {len(selected_contigs)} contig(s): {selected_contigs}. "
         f"Write modified depth and stats files to {outdir}."
     )
 
-    # only keep the depths of the selected contig
-    depths.query("ref == @selected", inplace=True)
-
-    # determine the limits for trimming off low-coverage regions at the ends
-    first_and_last_idx = depths.query(
-        "depth > depth.max() * @args.relative_depth_trim_threshold"
-    ).index[[0, -1]]
-    depths = depths.loc[slice(*first_and_last_idx)]
-    trim_start = depths.iloc[0]["start"]
-    trim_end = depths.iloc[-1]["end"]
-
-    # extract the selected consensus sequence and trim low-coverage regions from the
-    # ends
-    logger.info("Extract and write selected consensus sequence.")
-    with pysam.FastxFile(args.consensus) as f:
-        for entry in f:
-            if entry.name == selected:
-                break
-        else:
-            raise ValueError(
-                f"Selected consensus contig {selected} not found in"
-                f"consensus FASTx file '{args.consensus}'"
+    out_records = []
+    for idx, ctg in enumerate(selected_contigs):
+        entry = fastq[ctg]
+        ctg_depths = depths.query("ref == @ctg")
+        if not ctg_depths.empty and ctg_depths["depth"].max() > 0:
+            passing = ctg_depths.query(
+                "depth > depth.max() * @args.relative_depth_trim_threshold"
             )
-    entry.name = args.alias
-    entry.sequence = entry.sequence[trim_start:trim_end]
-    entry.quality = entry.quality[trim_start:trim_end]
+            if not passing.empty:
+                trim_start = int(passing.iloc[0]["start"])
+                trim_end = int(passing.iloc[-1]["end"])
+            else:
+                trim_start = 0
+                trim_end = len(entry.sequence)
+        else:
+            trim_start = 0
+            trim_end = len(entry.sequence)
+
+        if len(selected_contigs) == 1:
+            entry.name = args.alias
+        else:
+            entry.name = f"{args.alias}_{idx + 1}"
+
+        entry.sequence = entry.sequence[trim_start:trim_end]
+        if entry.quality is not None:
+            entry.quality = entry.quality[trim_start:trim_end]
+        out_records.append(str(entry))
+
     with open(outdir / args.consensus.name, "w") as f:
-        f.write(str(entry) + "\n")
+        for rec in out_records:
+            f.write(rec + "\n")
 
     logger.info("Done")
 
 
 def argparser():
     """Argument parser for entrypoint."""
-    parser = wf_parser("get_ref_with_largest_mean_depth")
+    parser = wf_parser("trim_and_qc")
     parser.add_argument(
         "--alias",
         type=str,
@@ -162,7 +174,7 @@ def argparser():
     parser.add_argument(
         "--consensus",
         type=Path,
-        help="Path to consensus FASTQ file.",
+        help="Path to consensus FASTQ/FASTA file.",
         required=True,
     )
     parser.add_argument(
@@ -188,18 +200,30 @@ def argparser():
     )
     parser.add_argument(
         "--minimum-depth",
+        "--minimum-mean-depth",
+        dest="minimum_depth",
         type=int,
         help="Minimum required depth to trust a consensus sequence.",
         required=True,
     )
     parser.add_argument(
         "--primary-threshold",
+        "--primary-alignments-threshold",
+        dest="primary_threshold",
         type=float,
         help=(
             "Threshold for proportion of primary alignments (will write a "
             "warning for samples with lower fraction)."
         ),
         required=True,
+    )
+    parser.add_argument(
+        "--max-contigs",
+        "--max-de-novo-contigs",
+        dest="max_contigs",
+        type=int,
+        default=2,
+        help="Maximum number of passing contigs to retain (default: 2).",
     )
     parser.add_argument(
         "--qc-summary-tsv",
