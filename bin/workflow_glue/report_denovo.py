@@ -172,7 +172,10 @@ def main(args):
     logger.info("Generating de novo assembly report from %s", args.data)
 
     sample_dirs = sorted(p for p in args.data.glob("*") if p.is_dir())
-    datasets = [DeNovoSampleData(d) for d in sample_dirs]
+    datasets = [
+        d for d in (DeNovoSampleData(p) for p in sample_dirs)
+        if d.consensus_records or d.qc_summary is not None or d.depth is not None
+    ]
 
     report = labs.LabsReport(
         "Diploid Amplicon De Novo Assembly Report",

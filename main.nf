@@ -10,14 +10,17 @@ include { getParams } from './lib/common'
 workflow {
     WorkflowMain.initialise(workflow, params, log)
 
-    if (params.analysis_mode != 'reference') {
-        error "Ticket 01 implements reference alignment; '${params.analysis_mode}' mode is not available yet."
+    if (!(params.analysis_mode in ['reference', 'denovo', 'both'])) {
+        error "Unsupported --analysis_mode '${params.analysis_mode}'; choose reference, denovo, or both."
     }
     if (params.analysis_mode in ['reference', 'both'] && !params.reference) {
         error "Analysis mode '${params.analysis_mode}' requires --reference."
     }
     if (!!params.fastq == !!params.bam) {
         error 'Provide exactly one of --fastq or --bam.'
+    }
+    if (params.bam && !params.reference) {
+        error '--bam requires --reference.'
     }
     if (!(params.trimmer in ['porechop', 'dorado', 'none'])) {
         error "Unsupported --trimmer '${params.trimmer}'; choose porechop, dorado, or none."
@@ -30,10 +33,17 @@ workflow {
     }
 
     ch_params = getParams()
-    ch_reference = build_reference(Channel.fromPath(params.reference, checkIfExists: true))
-    ch_target = params.target
-        ? Channel.fromPath(params.target, checkIfExists: true)
-        : make_full_target(ch_reference.map { ref, mmi, fai -> fai })
+    ch_versions = software_versions()
+
+    if (params.reference) {
+        ch_reference = build_reference(Channel.fromPath(params.reference, checkIfExists: true))
+        ch_target = params.target
+            ? Channel.fromPath(params.target, checkIfExists: true)
+            : make_full_target(ch_reference.map { ref, mmi, fai -> fai })
+    } else {
+        ch_reference = Channel.empty()
+        ch_target = Channel.empty()
+    }
 
     if (params.fastq) {
         ch_ingress = fastq_ingress([
@@ -106,61 +116,119 @@ workflow {
         }
         .map { meta, reads, report_data, n_reads -> [meta, reads, report_data] }
 
-    ch_map_inputs = ch_usable_reads.combine(ch_reference).combine(ch_target)
-        .map { meta, reads, report_data, ref, mmi, fai, target ->
-            [meta, reads, report_data, ref, mmi, fai, target]
-        }
-    ch_mapped = map_reads(ch_map_inputs)
-
-    if (params.bam) {
-        ch_existing_inputs = ch_already_aligned.combine(ch_reference).combine(ch_target)
-            .map { meta, bam, bai, ref, mmi, fai, target -> [meta, bam, bai, ref, fai, target] }
-        ch_existing = keep_aligned_bam(ch_existing_inputs)
-        ch_results = ch_mapped.mix(ch_existing)
-    } else {
-        ch_results = ch_mapped
-    }
-
-    ch_report_dirs = ch_results.map { meta, bam, bai, report_data -> report_data }.collect()
-    ch_target_for_report = ch_target
-    ch_versions = software_versions()
-    make_alignment_report(
-        ch_report_dirs,
-        Channel.value(file(params.reference)),
-        ch_target_for_report,
-        ch_params,
-        ch_versions
-    )
-
-    ch_repeats = params.cuban_repeats
-        ? Channel.fromPath(params.cuban_repeats, checkIfExists: true)
-        : Channel.value([])
-
-    if (params.snp) {
-        ch_snp = ch_results
-            .combine(ch_reference)
-            .combine(ch_target)
-            .map { meta, bam, bai, report_data, ref, mmi, fai, target ->
-                [meta, bam, bai, ref, fai, target, report_data]
+    if (params.analysis_mode in ['reference', 'both']) {
+        ch_map_inputs = ch_usable_reads.combine(ch_reference).combine(ch_target)
+            .map { meta, reads, report_data, ref, mmi, fai, target ->
+                [meta, reads, report_data, ref, mmi, fai, target]
             }
-        call_clair3(ch_snp)
+        ch_mapped = map_reads(ch_map_inputs)
 
-        if (params.phased) {
-            phase_snp(call_clair3.out.calls)
-            ch_raw_consensus_inputs = phase_snp.out.consensus_inputs
-            ch_raw_snp_reports = phase_snp.out.report_dirs
-            ch_sniffles_bam = phase_snp.out.consensus_inputs.map { meta, bam, ref, target, vcf, tbi, rep ->
-                [meta, bam, file("${bam}.bai"), true]
-            }
+        if (params.bam) {
+            ch_existing_inputs = ch_already_aligned.combine(ch_reference).combine(ch_target)
+                .map { meta, bam, bai, ref, mmi, fai, target -> [meta, bam, bai, ref, fai, target] }
+            ch_existing = keep_aligned_bam(ch_existing_inputs)
+            ch_results = ch_mapped.mix(ch_existing)
         } else {
-            ch_raw_consensus_inputs = call_clair3.out.calls
-            ch_raw_snp_reports = call_clair3.out.report_dirs
+            ch_results = ch_mapped
+        }
+
+        ch_report_dirs = ch_results.map { meta, bam, bai, report_data -> report_data }.collect()
+        ch_target_for_report = ch_target
+        make_alignment_report(
+            ch_report_dirs,
+            Channel.value(file(params.reference)),
+            ch_target_for_report,
+            ch_params,
+            ch_versions
+        )
+
+        ch_repeats = params.cuban_repeats
+            ? Channel.fromPath(params.cuban_repeats, checkIfExists: true)
+            : Channel.value([])
+
+        if (params.snp) {
+            ch_snp = ch_results
+                .combine(ch_reference)
+                .combine(ch_target)
+                .map { meta, bam, bai, report_data, ref, mmi, fai, target ->
+                    [meta, bam, bai, ref, fai, target, report_data]
+                }
+            call_clair3(ch_snp)
+
+            if (params.phased) {
+                phase_snp(call_clair3.out.calls)
+                ch_raw_consensus_inputs = phase_snp.out.consensus_inputs
+                ch_raw_snp_reports = phase_snp.out.report_dirs
+                ch_sniffles_bam = phase_snp.out.consensus_inputs.map { meta, bam, ref, target, vcf, tbi, rep ->
+                    [meta, bam, file("${bam}.bai"), true]
+                }
+            } else {
+                ch_raw_consensus_inputs = call_clair3.out.calls
+                ch_raw_snp_reports = call_clair3.out.report_dirs
+                ch_sniffles_bam = ch_results.map { meta, bam, bai, report_data ->
+                    [meta, bam, bai, false]
+                }
+            }
+
+            if (params.sv) {
+                ch_sniffles_in = ch_sniffles_bam
+                    .combine(ch_reference)
+                    .map { meta, bam, bai, is_phased, ref, mmi, fai ->
+                        [meta, bam, bai, ref, fai, is_phased]
+                    }
+                call_sniffles(ch_sniffles_in)
+
+                ch_filter_in = call_sniffles.out.raw_calls
+                    .combine(ch_target)
+                    .map { meta, raw_vcf, raw_tbi, target ->
+                        [meta, raw_vcf, raw_tbi, target]
+                    }
+                filter_sv_calls(ch_filter_in)
+
+                ch_refine_in = ch_raw_consensus_inputs
+                    .map { meta, bam, ref, target, vcf, tbi, rep ->
+                        [meta, bam, file("${bam}.bai"), ref, target, vcf, tbi]
+                    }
+                    .join(filter_sv_calls.out.filtered.map { meta, sv_vcf, sv_tbi, sv_tsv -> [meta, sv_vcf, sv_tbi] })
+                refine_snp_zygosity(ch_refine_in)
+
+                if (params.consensus) {
+                    make_haplotype_consensus(refine_snp_zygosity.out.consensus_inputs)
+                }
+                ch_snp_reports = refine_snp_zygosity.out.report_dirs.map { meta, dir -> dir }.collect()
+
+                ch_cuban_in = ch_sniffles_bam
+                    .map { meta, bam, bai, is_phased -> [meta, bam, bai] }
+                    .join(filter_sv_calls.out.filtered)
+                    .join(ch_results.map { meta, bam, bai, rep -> [meta, rep] })
+                    .combine(ch_reference)
+                    .map { meta, bam, bai, sv_vcf, sv_tbi, sv_tsv, rep, ref, mmi, fai ->
+                        [meta, bam, bai, sv_vcf, sv_tbi, sv_tsv, ref, fai, rep]
+                    }
+                plot_cuban(ch_cuban_in, ch_repeats)
+
+                ch_sv_reports = plot_cuban.out.report_dir.map { meta, dir -> dir }.collect()
+                make_sv_report(
+                    ch_sv_reports,
+                    ch_params,
+                    ch_versions
+                )
+            } else {
+                if (params.consensus) {
+                    make_haplotype_consensus(ch_raw_consensus_inputs)
+                }
+                ch_snp_reports = ch_raw_snp_reports.map { meta, dir -> dir }.collect()
+            }
+
+            make_snp_report(
+                ch_snp_reports,
+                ch_params,
+                ch_versions
+            )
+        } else if (params.sv) {
             ch_sniffles_bam = ch_results.map { meta, bam, bai, report_data ->
                 [meta, bam, bai, false]
             }
-        }
-
-        if (params.sv) {
             ch_sniffles_in = ch_sniffles_bam
                 .combine(ch_reference)
                 .map { meta, bam, bai, is_phased, ref, mmi, fai ->
@@ -174,18 +242,6 @@ workflow {
                     [meta, raw_vcf, raw_tbi, target]
                 }
             filter_sv_calls(ch_filter_in)
-
-            ch_refine_in = ch_raw_consensus_inputs
-                .map { meta, bam, ref, target, vcf, tbi, rep ->
-                    [meta, bam, file("${bam}.bai"), ref, target, vcf, tbi]
-                }
-                .join(filter_sv_calls.out.filtered.map { meta, sv_vcf, sv_tbi, sv_tsv -> [meta, sv_vcf, sv_tbi] })
-            refine_snp_zygosity(ch_refine_in)
-
-            if (params.consensus) {
-                make_haplotype_consensus(refine_snp_zygosity.out.consensus_inputs)
-            }
-            ch_snp_reports = refine_snp_zygosity.out.report_dirs.map { meta, dir -> dir }.collect()
 
             ch_cuban_in = ch_sniffles_bam
                 .map { meta, bam, bai, is_phased -> [meta, bam, bai] }
@@ -203,49 +259,47 @@ workflow {
                 ch_params,
                 ch_versions
             )
-        } else {
-            if (params.consensus) {
-                make_haplotype_consensus(ch_raw_consensus_inputs)
-            }
-            ch_snp_reports = ch_raw_snp_reports.map { meta, dir -> dir }.collect()
+        }
+    }
+
+    if (params.analysis_mode in ['denovo', 'both']) {
+        denovo_stage1_miniasm(ch_usable_reads)
+        ch_miniasm_branches = denovo_stage1_miniasm.out.branch { meta, draft, reads, report_data, status ->
+            assembled: status == 'assembled'
+            need_spoa: true
         }
 
-        make_snp_report(
-            ch_snp_reports,
-            ch_params,
-            ch_versions
+        denovo_stage1_spoa(
+            ch_miniasm_branches.need_spoa.map { meta, draft, reads, report_data, status ->
+                [meta, reads, report_data]
+            }
         )
-    } else if (params.sv) {
-        ch_sniffles_bam = ch_results.map { meta, bam, bai, report_data ->
-            [meta, bam, bai, false]
+
+        ch_stage1_drafts = ch_miniasm_branches.assembled
+            .map { meta, draft, reads, report_data, status -> [meta, draft, reads, report_data] }
+            .mix(denovo_stage1_spoa.out)
+
+        denovo_stage1_medaka(ch_stage1_drafts)
+        denovo_trim_and_qc(denovo_stage1_medaka.out)
+        denovo_stage2_align_draft(denovo_trim_and_qc.out)
+        denovo_stage2_phase_and_consensus(denovo_stage2_align_draft.out)
+        denovo_final_align_and_qc(denovo_stage2_phase_and_consensus.out)
+
+        if (params.reference) {
+            ch_ref_align_in = denovo_final_align_and_qc.out.results
+                .combine(ch_reference.map { ref, mmi, fai -> ref })
+                .combine(ch_target)
+                .map { meta, sample_dir, consensus, ref, target ->
+                    [meta, sample_dir, consensus, ref, target]
+                }
+            denovo_align_to_reference(ch_ref_align_in)
+            ch_denovo_reports = denovo_align_to_reference.out.sample_dir.map { meta, dir -> dir }.collect()
+        } else {
+            ch_denovo_reports = denovo_final_align_and_qc.out.results.map { meta, dir, consensus -> dir }.collect()
         }
-        ch_sniffles_in = ch_sniffles_bam
-            .combine(ch_reference)
-            .map { meta, bam, bai, is_phased, ref, mmi, fai ->
-                [meta, bam, bai, ref, fai, is_phased]
-            }
-        call_sniffles(ch_sniffles_in)
 
-        ch_filter_in = call_sniffles.out.raw_calls
-            .combine(ch_target)
-            .map { meta, raw_vcf, raw_tbi, target ->
-                [meta, raw_vcf, raw_tbi, target]
-            }
-        filter_sv_calls(ch_filter_in)
-
-        ch_cuban_in = ch_sniffles_bam
-            .map { meta, bam, bai, is_phased -> [meta, bam, bai] }
-            .join(filter_sv_calls.out.filtered)
-            .join(ch_results.map { meta, bam, bai, rep -> [meta, rep] })
-            .combine(ch_reference)
-            .map { meta, bam, bai, sv_vcf, sv_tbi, sv_tsv, rep, ref, mmi, fai ->
-                [meta, bam, bai, sv_vcf, sv_tbi, sv_tsv, ref, fai, rep]
-            }
-        plot_cuban(ch_cuban_in, ch_repeats)
-
-        ch_sv_reports = plot_cuban.out.report_dir.map { meta, dir -> dir }.collect()
-        make_sv_report(
-            ch_sv_reports,
+        make_denovo_report(
+            ch_denovo_reports,
             ch_params,
             ch_versions
         )
@@ -522,6 +576,10 @@ process software_versions {
         if command -v dorado >/dev/null 2>&1; then echo "dorado,\$(dorado --version 2>&1 | head -n 1)"; fi
         echo "sniffles,2.6.3"
         echo "cuban,0.1.0"
+        echo "miniasm,0.3-r179"
+        echo "racon,1.5.0"
+        echo "medaka,2.2.0"
+        echo "workflow-glue,${workflow.manifest.version}"
     } > versions.txt
     """
 }
@@ -629,12 +687,23 @@ process phase_snp {
     """
     samtools faidx '$reference'
     samtools index '$bam'
-    whatshap phase --indels --ignore-read-groups --reference '$reference' --output phased.vcf.gz '$vcf' '$bam'
-    tabix -f -p vcf phased.vcf.gz
-    whatshap haplotag --ignore-read-groups --skip-missing-contigs --reference '$reference' --output phased.bam phased.vcf.gz '$bam'
-    samtools index phased.bam
-    touch haploblocks.gtf
-    whatshap stats --gtf haploblocks.gtf phased.vcf.gz || true
+    n_mapped=\$(samtools view -c -F 4 '$bam' || echo 0)
+    n_vars=\$(bcftools view -H '$vcf' 2>/dev/null | head -n 1 | wc -l || echo 0)
+
+    if [ "\$n_mapped" -gt 0 ] && [ "\$n_vars" -gt 0 ]; then
+        whatshap phase --indels --ignore-read-groups --reference '$reference' --output phased.vcf.gz '$vcf' '$bam' || cp '$vcf' phased.vcf.gz
+        tabix -f -p vcf phased.vcf.gz
+        whatshap haplotag --ignore-read-groups --skip-missing-contigs --reference '$reference' --output phased.bam phased.vcf.gz '$bam' || cp '$bam' phased.bam
+        samtools index phased.bam
+        touch haploblocks.gtf
+        whatshap stats --gtf haploblocks.gtf phased.vcf.gz || true
+    else
+        cp '$vcf' phased.vcf.gz
+        tabix -f -p vcf phased.vcf.gz
+        cp '$bam' phased.bam
+        samtools index phased.bam
+        touch haploblocks.gtf
+    fi
     cp phased.bam '${meta.alias}.haplotagged.bam'
     cp phased.bam.bai '${meta.alias}.haplotagged.bam.bai'
     cp phased.vcf.gz '${meta.alias}.nf_snp.vcf.gz'
@@ -853,6 +922,295 @@ process make_sv_report {
     """
     workflow-glue report_sv \\
         --report-fname nf-amplicon-sv-report.html \\
+        --data . \\
+        --versions '$versions' \\
+        --params '$params_json' \\
+        --wf-version '${workflow.manifest.version}'
+    """
+}
+
+process denovo_stage1_miniasm {
+    label 'wfamplicon'
+    cpus 4
+    memory '8 GB'
+    input:
+        tuple val(meta), path(reads), path(report_data)
+    output:
+        tuple val(meta), path('miniasm_draft.fasta'), path(reads), path(report_data), env(STATUS)
+    script:
+    def ava_extra = params.minimap2_extra_args ?: ''
+    def miniasm_extra = params.miniasm_extra_args ?: ''
+    def racon_extra = params.racon_extra_args ?: ''
+    """
+    minimap2 -x ava-ont -t $task.cpus $ava_extra '$reads' '$reads' > reads_ava.paf 2>/dev/null || true
+    miniasm -f '$reads' reads_ava.paf $miniasm_extra > draft.gfa 2>/dev/null || true
+    awk '/^S/{print ">"\$2"\\n"\$3}' draft.gfa > raw_contigs.fasta || true
+
+    MAX_LEN=0
+    if [ -s raw_contigs.fasta ]; then
+        MAX_LEN=\$(awk '/^>/ {if (seqlen){print seqlen}; seqlen=0; next} {seqlen+=length(\$0)} END {print seqlen}' raw_contigs.fasta | sort -nr | head -n 1)
+    fi
+    MAX_LEN=\${MAX_LEN:-0}
+
+    if [ "\$MAX_LEN" -ge "${params.force_spoa_length_threshold}" ]; then
+        minimap2 -t $task.cpus raw_contigs.fasta '$reads' > racon.paf 2>/dev/null || true
+        racon -t $task.cpus $racon_extra '$reads' racon.paf raw_contigs.fasta > miniasm_draft.fasta 2>/dev/null || cp raw_contigs.fasta miniasm_draft.fasta
+        export STATUS="assembled"
+    else
+        touch miniasm_draft.fasta
+        export STATUS="need_spoa"
+    fi
+    """
+}
+
+process denovo_stage1_spoa {
+    label 'medaka'
+    cpus 4
+    memory '8 GB'
+    input:
+        tuple val(meta), path(reads), path(report_data)
+    output:
+        tuple val(meta), path('spoa_draft.fasta'), path(reads), path(report_data)
+    script:
+    """
+    workflow-glue run_spoa '$reads' -o spoa_draft.fasta \\
+        --relative-min-coverage ${params.spoa_minimum_relative_coverage} \\
+        --max-allowed-read-length ${params.spoa_max_allowed_read_length}
+    """
+}
+
+process denovo_stage1_medaka {
+    label 'medaka'
+    cpus 4
+    memory '8 GB'
+    input:
+        tuple val(meta), path(draft), path(reads), path(report_data)
+    output:
+        tuple val(meta), path('medaka_draft.fasta'), path(reads), path(report_data)
+    script:
+    def model = params.override_basecaller_cfg ?: (params.containsKey('clair3_model') && params.clair3_model ? params.clair3_model : params.clair3_model_path) ?: ''
+    def medaka_extra = params.medaka_extra_args ?: ''
+    """
+    model='${model ?: ''}'
+    if [ -z "\$model" ] && [ -s '$report_data/post-trim-basecallers.tsv' ]; then
+        model=\$(awk 'NR==2 { print \$2; exit }' '$report_data/post-trim-basecallers.tsv')
+    fi
+    if [ -n "\$model" ]; then
+        model=\$(printf '%s' "\$model" | sed -E 's/^dna_//; s/^r10\\.4\\.1_e8\\.2_/r1041_e82_/; s/@v([0-9]+)\\.([0-9]+)\\.([0-9]+)/_v\\1.\\2.\\3/')
+    fi
+    model="\${model:-r1041_e82_400bps_hac_v4.2.0}"
+
+    if medaka_consensus -i '$reads' -d '$draft' -o medaka_out -t $task.cpus -m "\$model" $medaka_extra 2>/dev/null && [ -s medaka_out/consensus.fasta ]; then
+        cp medaka_out/consensus.fasta medaka_draft.fasta
+    else
+        cp '$draft' medaka_draft.fasta
+    fi
+    """
+}
+
+process denovo_trim_and_qc {
+    label 'wfamplicon'
+    cpus 4
+    memory '8 GB'
+    input:
+        tuple val(meta), path(draft), path(reads), path(report_data)
+    output:
+        tuple val(meta), path('draft_trimmed.fasta'), path('qc-summary.tsv'), path(reads)
+    script:
+    """
+    mkdir -p pass fail
+    minimap2 -ax map-ont -t $task.cpus '$draft' '$reads' \\
+        | samtools sort -@ $task.cpus -o candidate.bam -
+    samtools index -@ $task.cpus candidate.bam
+    bamstats candidate.bam -s '${meta.alias}' -u -f bamstats-flagstat.tsv -t $task.cpus > bamstats.tsv
+    mosdepth -t $task.cpus candidate candidate.bam
+
+    workflow-glue trim_and_qc \\
+        --consensus '$draft' \\
+        --flagstat bamstats-flagstat.tsv \\
+        --depth candidate.per-base.bed.gz \\
+        --alias '${meta.alias}' \\
+        --asm-method 'denovo' \\
+        --outdir-pass pass \\
+        --outdir-fail fail \\
+        --qc-summary-tsv qc-summary.tsv \\
+        --minimum-depth ${params.minimum_mean_depth} \\
+        --primary-threshold ${params.primary_alignments_threshold} \\
+        --relative-depth-trim-threshold 0.1 \\
+        --max-contigs ${params.max_de_novo_contigs}
+
+    if [ -s "pass/${draft.name}" ]; then
+        cp "pass/${draft.name}" draft_trimmed.fasta
+        cp pass/qc-summary.tsv qc-summary.tsv
+    else
+        cp fail/qc-summary.tsv qc-summary.tsv || touch qc-summary.tsv
+        cp '$draft' draft_trimmed.fasta
+    fi
+    """
+}
+
+process denovo_stage2_align_draft {
+    label 'wfamplicon'
+    cpus 4
+    memory '8 GB'
+    input:
+        tuple val(meta), path(draft_trimmed), path(qc_summary), path(reads)
+    output:
+        tuple val(meta), path(draft_trimmed), path('aligned_to_draft.bam'), path('aligned_to_draft.bam.bai'), path(qc_summary), path(reads)
+    script:
+    """
+    samtools faidx '$draft_trimmed'
+    minimap2 -ax map-ont -t $task.cpus '$draft_trimmed' '$reads' \\
+        | samtools sort -@ $task.cpus -o aligned_to_draft.bam -
+    samtools index -@ $task.cpus aligned_to_draft.bam
+    """
+}
+
+process denovo_stage2_phase_and_consensus {
+    label 'wf_human_snp'
+    cpus 4
+    memory '8 GB'
+    input:
+        tuple val(meta), path(draft_fasta), path(draft_bam), path(draft_bai), path(qc_summary), path(reads)
+    output:
+        tuple val(meta), path("${meta.alias}.consensus.fasta"), path(qc_summary), path(reads)
+    script:
+    def model = params.override_basecaller_cfg ?: (params.containsKey('clair3_model') && params.clair3_model ? params.clair3_model : params.clair3_model_path) ?: ''
+    def extra = params.clair3_extra_args ?: ''
+    """
+    samtools faidx '$draft_fasta'
+    N_CONTIGS=\$(grep -c '^>' '$draft_fasta' || echo 0)
+
+    if [ "\$N_CONTIGS" -gt 1 ]; then
+        awk 'BEGIN { c=0 } /^>/ { c++; if (c==1) print ">'${meta.alias}'_hap1"; else if (c==2) print ">'${meta.alias}'_hap2"; else print \$0; next } { print }' '$draft_fasta' > '${meta.alias}.consensus.fasta'
+    elif [ "\$N_CONTIGS" -eq 1 ]; then
+        awk 'BEGIN { OFS="\\t" } { print \$1, 0, \$2 }' "${draft_fasta}.fai" > draft.bed
+        export CONDA_PREFIX=\$(dirname "\$(dirname "\$(which clair3.py)")")
+        model='${model ?: ''}'
+        if [ -n "\$model" ]; then
+            model=\$(printf '%s' "\$model" | sed -E 's/^dna_//; s/^r10\\.4\\.1_e8\\.2_/r1041_e82_/; s/@v([0-9]+)\\.([0-9]+)\\.([0-9]+)/_v\\1\\2\\3/; s/\\.([0-9]+)\$/\\1/')
+        fi
+        model="\${model:-r1041_e82_400bps_hac_v420}"
+        if [ -d "/opt/custflow/epi2meuser/models/\$model" ]; then
+            model="/opt/custflow/epi2meuser/models/\$model"
+        fi
+
+        status=0
+        run_clair3.sh \\
+            --bam_fn='$draft_bam' \\
+            --ref_fn='$draft_fasta' \\
+            --threads=$task.cpus \\
+            --platform='ont' \\
+            --model_path="\$model" \\
+            --bed_fn='draft.bed' \\
+            --output='clair3_out' \\
+            --include_all_ctgs \\
+            $extra > clair3.log 2>&1 || status=\$?
+
+        if [ "\$status" -eq 0 ] && [ -s clair3_out/merge_output.vcf.gz ]; then
+            tabix -f -p vcf clair3_out/merge_output.vcf.gz || true
+            whatshap phase --indels --ignore-read-groups --reference '$draft_fasta' \\
+                --output phased.vcf.gz clair3_out/merge_output.vcf.gz '$draft_bam' > whatshap.log 2>&1 || cp clair3_out/merge_output.vcf.gz phased.vcf.gz
+            tabix -f -p vcf phased.vcf.gz || true
+
+            n_phased=\$(bcftools view -H -i 'GT="0|1" || GT="1|0"' phased.vcf.gz 2>/dev/null | wc -l || echo 0)
+            if [ "\$n_phased" -gt 0 ]; then
+                bcftools consensus -i 'FILTER="PASS"' -H 1 -f '$draft_fasta' phased.vcf.gz \\
+                    | sed "1s/.*/>${meta.alias}_hap1/" > "${meta.alias}_hap1.fasta"
+                bcftools consensus -i 'FILTER="PASS"' -H 2 -f '$draft_fasta' phased.vcf.gz \\
+                    | sed "1s/.*/>${meta.alias}_hap2/" > "${meta.alias}_hap2.fasta"
+                cat "${meta.alias}_hap1.fasta" "${meta.alias}_hap2.fasta" > "${meta.alias}.consensus.fasta"
+            else
+                bcftools consensus -i 'FILTER="PASS"' -f '$draft_fasta' phased.vcf.gz \\
+                    | sed "1s/.*/>${meta.alias}_consensus/" > "${meta.alias}.consensus.fasta"
+            fi
+        else
+            sed "1s/.*/>${meta.alias}_consensus/" '$draft_fasta' > "${meta.alias}.consensus.fasta"
+        fi
+    else
+        touch "${meta.alias}.consensus.fasta"
+    fi
+    """
+}
+
+process denovo_final_align_and_qc {
+    label 'wfamplicon'
+    cpus 4
+    memory '8 GB'
+    publishDir "${params.out_dir}/${meta.alias}/denovo", mode: 'copy', pattern: '{*.fasta,*.tsv,*.tsv.gz,*.bam,*.bam.bai}'
+    input:
+        tuple val(meta), path(consensus), path(qc_summary), path(reads)
+    output:
+        tuple val(meta), path("${meta.alias}"), path("${meta.alias}.consensus.fasta"), emit: results
+        tuple val(meta), path("${meta.alias}.consensus.fasta"), path('qc-summary.tsv'), path('aligned.bam'), path('aligned.bam.bai'), path('bamstats.tsv'), path('bamstats-flagstat.tsv'), path('per-window-depth.tsv.gz'), emit: published_files
+    script:
+    """
+    if [ '$consensus' != "${meta.alias}.consensus.fasta" ]; then cp '$consensus' "${meta.alias}.consensus.fasta"; fi
+    if [ '$qc_summary' != "qc-summary.tsv" ]; then cp '$qc_summary' qc-summary.tsv; fi
+
+    samtools faidx "${meta.alias}.consensus.fasta"
+    minimap2 -ax map-ont -t $task.cpus "${meta.alias}.consensus.fasta" '$reads' \\
+        | samtools sort -@ $task.cpus -o aligned.bam -
+    samtools index -@ $task.cpus aligned.bam
+
+    bamstats aligned.bam -s '${meta.alias}' -u \\
+        -f bamstats-flagstat.tsv -t $task.cpus > bamstats.tsv
+
+    awk 'BEGIN { OFS="\\t" } { print \$1, 0, \$2, \$1 }' "${meta.alias}.consensus.fasta.fai" > depth_targets.bed
+    awk -F '\\t' -v n=${params.number_depth_windows} 'BEGIN { OFS="\\t" } { len=\$3-\$2; k=(len<n ? len : n); name=(NF>=4 ? \$4 : \$1 ":" \$2 "-" \$3); for (i=0; i<k; i++) { s=\$2+int(i*len/k); e=\$2+int((i+1)*len/k); print \$1,s,e,name "_window" i } }' \\
+        depth_targets.bed > depth-windows.bed
+    mosdepth --by depth-windows.bed --threads $task.cpus target aligned.bam
+    { printf 'ref\\tstart\\tend\\tdepth\\n'; zcat target.regions.bed.gz | awk 'BEGIN { OFS="\\t" } { print \$1, \$2, \$3, \$NF }'; } \\
+        | bgzip -c > per-window-depth.tsv.gz
+
+    mkdir -p "${meta.alias}"
+    cp "${meta.alias}.consensus.fasta" qc-summary.tsv per-window-depth.tsv.gz "${meta.alias}/"
+    """
+}
+
+process denovo_align_to_reference {
+    label 'wfamplicon'
+    cpus 2
+    memory '4 GB'
+    publishDir "${params.out_dir}/${meta.alias}/denovo", mode: 'copy', pattern: "${meta.alias}.*"
+    input:
+        tuple val(meta), path(sample_dir), path(consensus), path(reference), path(target_bed)
+    output:
+        tuple val(meta), path("${sample_dir}"), emit: sample_dir
+        tuple val(meta), path("${meta.alias}.denovo_to_ref.paf"), path("${meta.alias}.dotplot.png"), emit: published_files
+    script:
+    def has_target = params.target ? 'true' : 'false'
+    """
+    samtools faidx '$reference'
+    if [ "$has_target" = "true" ] && [ -s '$target_bed' ]; then
+        awk '{ print \$1 ":" \$2+1 "-" \$3 }' '$target_bed' > regions.txt
+        samtools faidx -r regions.txt '$reference' > ref_target.fasta
+        ALIGN_REF="ref_target.fasta"
+    else
+        ALIGN_REF='$reference'
+    fi
+
+    minimap2 -x asm20 -c --eqx -t $task.cpus "\$ALIGN_REF" '$consensus' > '${meta.alias}.denovo_to_ref.paf'
+    workflow-glue dotplot --paf '${meta.alias}.denovo_to_ref.paf' --output-png '${meta.alias}.dotplot.png' --alias '${meta.alias}'
+    cp '${meta.alias}.denovo_to_ref.paf' '${meta.alias}.dotplot.png' '${sample_dir}/'
+    """
+}
+
+process make_denovo_report {
+    label 'wf_common'
+    cpus 1
+    memory '4 GB'
+    publishDir params.out_dir, mode: 'copy', pattern: 'nf-amplicon-denovo-report.html'
+    input:
+        path sample_reports
+        path params_json
+        path versions
+    output:
+        path 'nf-amplicon-denovo-report.html'
+    script:
+    """
+    workflow-glue report_denovo \\
+        --report-fname nf-amplicon-denovo-report.html \\
         --data . \\
         --versions '$versions' \\
         --params '$params_json' \\
