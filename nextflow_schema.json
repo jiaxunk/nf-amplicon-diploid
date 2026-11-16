@@ -346,6 +346,14 @@
           "description": "Minimum variant allele frequency for a reported SV.",
           "help_text": "Structural variants with an allele frequency below this threshold are filtered from the final VCF. Set to 0 to disable VAF filtering."
         },
+        "min_alignment_length": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 0,
+          "title": "Sniffles minimum alignment length for SV calling",
+          "description": "Minimum length of aligned read segment required for structural variant calling in Sniffles.",
+          "help_text": "Passed to Sniffles as --min-alignment-length."
+        },
         "sniffles_extra_args": {
           "type": "string",
           "title": "Sniffles extra arguments",
@@ -372,27 +380,19 @@
           "description": "Window size for CUBAN depth and coverage calculation.",
           "help_text": "Passed to CUBAN as --window."
         },
+        "cuban_max_reads": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "title": "Cuban maximum reads plotted per SV panel",
+          "description": "Maximum number of supporting/spanning reads rendered in Cuban breakpoint evidence plots.",
+          "help_text": "Passed to CUBAN as --max-reads."
+        },
         "cuban_extra_args": {
           "type": "string",
           "title": "CUBAN extra arguments",
           "description": "Additional arguments passed to CUBAN.",
           "help_text": "These arguments are appended verbatim to the CUBAN command."
-        },
-        "min_alignment_length": {
-          "type": "integer",
-          "default": 50,
-          "minimum": 0,
-          "title": "Minimum alignment length for SV calling",
-          "description": "Minimum length of aligned read segment required for structural variant calling in Sniffles.",
-          "help_text": "Passed to Sniffles as --min-alignment-length."
-        },
-        "cuban_max_reads": {
-          "type": "integer",
-          "default": 100,
-          "minimum": 1,
-          "title": "Maximum reads plotted per Cuban SV panel",
-          "description": "Maximum number of supporting/spanning reads rendered in Cuban breakpoint evidence plots.",
-          "help_text": "Passed to CUBAN as --max-reads."
         }
       }
     },
