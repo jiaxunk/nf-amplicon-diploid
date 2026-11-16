@@ -829,6 +829,7 @@ process call_sniffles {
         tuple val(meta), path('raw_sv.vcf.gz'), path('raw_sv.vcf.gz.tbi'), emit: raw_calls
     script:
     def phase_arg = is_phased ? '--phase' : ''
+    def no_qc_arg = params.sniffles_no_qc ? '--no-qc' : ''
     def extra = params.sniffles_extra_args ?: ''
     """
     samtools faidx '$reference'
@@ -840,6 +841,7 @@ process call_sniffles {
         --minsvlen ${params.min_sv_length} \\
         --min-alignment-length ${params.min_alignment_length} \\
         --threads $task.cpus \\
+        $no_qc_arg \\
         $phase_arg \\
         $extra
     tabix -f -p vcf raw_sv.vcf.gz

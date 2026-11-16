@@ -354,6 +354,13 @@
           "description": "Minimum length of aligned read segment required for structural variant calling in Sniffles.",
           "help_text": "Passed to Sniffles as --min-alignment-length."
         },
+        "sniffles_no_qc": {
+          "type": "boolean",
+          "default": true,
+          "title": "Sniffles bypass whole-genome QC",
+          "description": "Bypass Sniffles internal whole-genome coverage drop QC heuristics (--no-qc). Recommended for amplicon sequencing.",
+          "help_text": "In targeted amplicon sequencing, coverage drops to zero outside amplicon boundaries, causing Sniffles whole-genome QC heuristics to silently discard true large SVs. When enabled (--no-qc), Sniffles retains all candidates, allowing them to be evaluated by downstream target-region and VAF filters."
+        },
         "sniffles_extra_args": {
           "type": "string",
           "title": "Sniffles extra arguments",
