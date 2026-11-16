@@ -1,0 +1,108 @@
+{
+  "files": {
+    "alignment-report": {
+      "filepath": "./nf-amplicon-alignment-report.html",
+      "title": "Alignment Report",
+      "description": "Coverage and alignment quality report across all samples.",
+      "mime-type": "text/html",
+      "optional": true,
+      "type": "aggregated"
+    },
+    "snp-report": {
+      "filepath": "./nf-amplicon-snp-report.html",
+      "title": "SNP & Small Indel Report",
+      "description": "Small variant calling, phasing, and haplotype consensus report across all samples.",
+      "mime-type": "text/html",
+      "optional": true,
+      "type": "aggregated"
+    },
+    "sv-report": {
+      "filepath": "./nf-amplicon-sv-report.html",
+      "title": "Structural Variant Report",
+      "description": "Structural variant calling, zygosity refinement, and Cuban breakpoint evidence plots.",
+      "mime-type": "text/html",
+      "optional": true,
+      "type": "aggregated"
+    },
+    "denovo-report": {
+      "filepath": "./nf-amplicon-denovo-report.html",
+      "title": "De Novo Assembly Report",
+      "description": "Diploid de novo assembly QC, contigs, and synteny dot plots across all samples.",
+      "mime-type": "text/html",
+      "optional": true,
+      "type": "aggregated"
+    },
+    "igv-session": {
+      "filepath": "./igv.json",
+      "title": "IGV Session Configuration",
+      "description": "Session file for loading reference, alignments, and variants in the Integrative Genomics Viewer.",
+      "mime-type": "text/json",
+      "optional": true,
+      "type": "aggregated"
+    },
+    "params": {
+      "filepath": "./params.json",
+      "title": "Workflow Parameters",
+      "description": "Record of all parameters used for this workflow execution.",
+      "mime-type": "text/json",
+      "optional": false,
+      "type": "aggregated"
+    },
+    "haplotagged-alignments": {
+      "filepath": "./{{ alias }}/alignments/{{ alias }}.haplotagged.bam",
+      "title": "Haplotagged BAM",
+      "description": "Per-sample phased haplotagged BAM alignment file.",
+      "mime-type": "application/octet-stream",
+      "optional": true,
+      "type": "per-sample"
+    },
+    "phased-variants-vcf": {
+      "filepath": "./{{ alias }}/variants/{{ alias }}.nf_snp.vcf.gz",
+      "title": "Phased Small Variants VCF",
+      "description": "Phased small variant calls with genotype and phase tags.",
+      "mime-type": "application/gzip",
+      "optional": true,
+      "type": "per-sample"
+    },
+    "structural-variants-vcf": {
+      "filepath": "./{{ alias }}/variants/{{ alias }}.nf_sv.vcf.gz",
+      "title": "Structural Variants VCF",
+      "description": "Filtered structural variant calls from Sniffles2.",
+      "mime-type": "application/gzip",
+      "optional": true,
+      "type": "per-sample"
+    },
+    "denovo-consensus": {
+      "filepath": "./{{ alias }}/denovo/{{ alias }}.consensus.fasta",
+      "title": "De Novo Consensus Contig(s)",
+      "description": "Assembled and polished de novo consensus sequence(s).",
+      "mime-type": "text/plain",
+      "optional": true,
+      "type": "per-sample"
+    },
+    "denovo-alignments": {
+      "filepath": "./{{ alias }}/denovo/aligned.bam",
+      "title": "De Novo Reads-to-Contig Alignment",
+      "description": "Reads aligned back to the de novo assembled consensus contigs.",
+      "mime-type": "application/octet-stream",
+      "optional": true,
+      "type": "per-sample"
+    },
+    "denovo-to-ref-alignments": {
+      "filepath": "./{{ alias }}/denovo/{{ alias }}.denovo_to_ref.bam",
+      "title": "De Novo to Reference Alignment",
+      "description": "De novo consensus contig mapped against the reference genome.",
+      "mime-type": "application/octet-stream",
+      "optional": true,
+      "type": "per-sample"
+    },
+    "denovo-dotplot": {
+      "filepath": "./{{ alias }}/denovo/{{ alias }}.dotplot.png",
+      "title": "Consensus Dot Plot",
+      "description": "Synteny dot plot of de novo consensus sequence aligned to reference.",
+      "mime-type": "image/png",
+      "optional": true,
+      "type": "per-sample"
+    }
+  }
+}

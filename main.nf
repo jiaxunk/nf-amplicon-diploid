@@ -7,23 +7,40 @@ import WorkflowMain
 include { fastq_ingress; xam_ingress } from './lib/ingress'
 include { getParams } from './lib/common'
 
+def resolveDemoPath(pathStr) {
+    if (!pathStr) return pathStr
+    def f = file(pathStr)
+    if (f.exists()) return pathStr
+    if (pathStr.startsWith('nf-amplicon-diploid-demo/')) {
+        def fallback = file("${projectDir}/test_data/${pathStr.replaceFirst('^nf-amplicon-diploid-demo/', '')}")
+        if (fallback.exists()) return fallback.toString()
+    }
+    return pathStr
+}
+
 workflow {
     WorkflowMain.initialise(workflow, params, log)
+
+    def opt_fastq = resolveDemoPath(params.fastq)
+    def opt_bam = resolveDemoPath(params.bam)
+    def opt_reference = resolveDemoPath(params.reference)
+    def opt_target = resolveDemoPath(params.target)
+    def opt_sample_sheet = resolveDemoPath(params.sample_sheet)
 
     if (!(params.analysis_mode in ['reference', 'denovo', 'both'])) {
         error "Unsupported --analysis_mode '${params.analysis_mode}'; choose reference, denovo, or both."
     }
-    if (params.analysis_mode in ['reference', 'both'] && !params.reference) {
+    if (params.analysis_mode in ['reference', 'both'] && !opt_reference) {
         error "Analysis mode '${params.analysis_mode}' requires --reference."
     }
-    if (!!params.fastq == !!params.bam) {
+    if (!!opt_fastq == !!opt_bam) {
         error 'Provide exactly one of --fastq or --bam.'
     }
-    if (params.bam && !params.reference) {
+    if (opt_bam && !opt_reference) {
         error '--bam requires --reference.'
     }
-    if (!(params.trimmer in ['porechop', 'dorado', 'none'])) {
-        error "Unsupported --trimmer '${params.trimmer}'; choose porechop, dorado, or none."
+    if (!(params.trimmer in ['porechop', 'none'])) {
+        error "Unsupported --trimmer '${params.trimmer}'; choose porechop or none."
     }
     if (params.reads_downsampling_size != null && params.reads_downsampling_size < 0) {
         error '--reads_downsampling_size must be zero (disabled) or a positive integer.'
@@ -35,21 +52,21 @@ workflow {
     ch_params = getParams()
     ch_versions = software_versions()
 
-    if (params.reference) {
-        ch_reference = build_reference(Channel.fromPath(params.reference, checkIfExists: true))
-        ch_target = params.target
-            ? Channel.fromPath(params.target, checkIfExists: true)
+    if (opt_reference) {
+        ch_reference = build_reference(Channel.fromPath(opt_reference, checkIfExists: true))
+        ch_target = opt_target
+            ? Channel.fromPath(opt_target, checkIfExists: true)
             : make_full_target(ch_reference.map { ref, mmi, fai -> fai })
     } else {
         ch_reference = Channel.empty()
         ch_target = Channel.empty()
     }
 
-    if (params.fastq) {
+    if (opt_fastq) {
         ch_ingress = fastq_ingress([
-            input: params.fastq,
+            input: opt_fastq,
             sample: params.sample,
-            sample_sheet: params.sample_sheet,
+            sample_sheet: opt_sample_sheet,
             analyse_unclassified: params.analyse_unclassified,
             analyse_fail: params.analyse_fail,
             stats: true,
@@ -62,9 +79,9 @@ workflow {
             | filter_downsample
     } else {
         ch_xam = xam_ingress([
-            input: params.bam,
+            input: opt_bam,
             sample: params.sample,
-            sample_sheet: params.sample_sheet,
+            sample_sheet: opt_sample_sheet,
             analyse_unclassified: params.analyse_unclassified,
             analyse_fail: params.analyse_fail,
             keep_unaligned: true,
@@ -100,8 +117,6 @@ workflow {
 
     if (params.trimmer == 'porechop') {
         ch_trimmed = porechop_trim(ch_pretrimmed)
-    } else if (params.trimmer == 'dorado') {
-        ch_trimmed = post_trim_stats(dorado_trim(ch_pretrimmed))
     } else {
         ch_trimmed = no_trim(ch_pretrimmed)
     }
@@ -116,6 +131,11 @@ workflow {
         }
         .map { meta, reads, report_data, n_reads -> [meta, reads, report_data] }
 
+    ch_align_report = Channel.empty()
+    ch_snp_report = Channel.empty()
+    ch_sv_report = Channel.empty()
+    ch_denovo_report = Channel.empty()
+
     if (params.analysis_mode in ['reference', 'both']) {
         ch_map_inputs = ch_usable_reads.combine(ch_reference).combine(ch_target)
             .map { meta, reads, report_data, ref, mmi, fai, target ->
@@ -123,7 +143,7 @@ workflow {
             }
         ch_mapped = map_reads(ch_map_inputs)
 
-        if (params.bam) {
+        if (opt_bam) {
             ch_existing_inputs = ch_already_aligned.combine(ch_reference).combine(ch_target)
                 .map { meta, bam, bai, ref, mmi, fai, target -> [meta, bam, bai, ref, fai, target] }
             ch_existing = keep_aligned_bam(ch_existing_inputs)
@@ -134,9 +154,9 @@ workflow {
 
         ch_report_dirs = ch_results.map { meta, bam, bai, report_data -> report_data }.collect()
         ch_target_for_report = ch_target
-        make_alignment_report(
+        ch_align_report = make_alignment_report(
             ch_report_dirs,
-            Channel.value(file(params.reference)),
+            Channel.value(file(opt_reference)),
             ch_target_for_report,
             ch_params,
             ch_versions
@@ -208,7 +228,7 @@ workflow {
                 plot_cuban(ch_cuban_in, ch_repeats)
 
                 ch_sv_reports = plot_cuban.out.report_dir.map { meta, dir -> dir }.collect()
-                make_sv_report(
+                ch_sv_report = make_sv_report(
                     ch_sv_reports,
                     ch_params,
                     ch_versions
@@ -220,7 +240,7 @@ workflow {
                 ch_snp_reports = ch_raw_snp_reports.map { meta, dir -> dir }.collect()
             }
 
-            make_snp_report(
+            ch_snp_report = make_snp_report(
                 ch_snp_reports,
                 ch_params,
                 ch_versions
@@ -254,7 +274,7 @@ workflow {
             plot_cuban(ch_cuban_in, ch_repeats)
 
             ch_sv_reports = plot_cuban.out.report_dir.map { meta, dir -> dir }.collect()
-            make_sv_report(
+            ch_sv_report = make_sv_report(
                 ch_sv_reports,
                 ch_params,
                 ch_versions
@@ -285,7 +305,7 @@ workflow {
         denovo_stage2_phase_and_consensus(denovo_stage2_align_draft.out)
         denovo_final_align_and_qc(denovo_stage2_phase_and_consensus.out)
 
-        if (params.reference) {
+        if (opt_reference) {
             ch_ref_align_in = denovo_final_align_and_qc.out.results
                 .combine(ch_reference.map { ref, mmi, fai -> ref })
                 .combine(ch_target)
@@ -298,11 +318,71 @@ workflow {
             ch_denovo_reports = denovo_final_align_and_qc.out.results.map { meta, dir, consensus -> dir }.collect()
         }
 
-        make_denovo_report(
+        ch_denovo_report = make_denovo_report(
             ch_denovo_reports,
             ch_params,
             ch_versions
         )
+    }
+
+    if (params.igv) {
+        ch_igv_lines = Channel.empty()
+        if (params.analysis_mode in ['reference', 'both']) {
+            ch_igv_lines = ch_igv_lines.mix(
+                Channel.of("reference/reference.fa\nreference/reference.fa.fai")
+            )
+            if (params.snp && params.phased) {
+                ch_igv_lines = ch_igv_lines.mix(
+                    phase_snp.out.consensus_inputs.map { meta, bam, ref, target, vcf, tbi, rep ->
+                        "${meta.alias},${meta.alias}/alignments/${meta.alias}.haplotagged.bam\n${meta.alias},${meta.alias}/alignments/${meta.alias}.haplotagged.bam.bai\n${meta.alias},${meta.alias}/variants/${meta.alias}.nf_snp.vcf.gz\n${meta.alias},${meta.alias}/variants/${meta.alias}.nf_snp.vcf.gz.tbi"
+                    }
+                )
+            } else if (params.snp) {
+                ch_igv_lines = ch_igv_lines.mix(
+                    call_clair3.out.calls.map { meta, bam, ref, target, vcf, tbi, rep ->
+                        "${meta.alias},${meta.alias}/alignments/aligned.bam\n${meta.alias},${meta.alias}/alignments/aligned.bam.bai\n${meta.alias},${meta.alias}/variants/${meta.alias}.nf_snp.vcf.gz\n${meta.alias},${meta.alias}/variants/${meta.alias}.nf_snp.vcf.gz.tbi"
+                    }
+                )
+            } else {
+                ch_igv_lines = ch_igv_lines.mix(
+                    ch_results.map { meta, bam, bai, rep ->
+                        "${meta.alias},${meta.alias}/alignments/aligned.bam\n${meta.alias},${meta.alias}/alignments/aligned.bam.bai"
+                    }
+                )
+            }
+
+            if (params.sv) {
+                ch_igv_lines = ch_igv_lines.mix(
+                    filter_sv_calls.out.filtered.map { meta, sv_vcf, sv_tbi, sv_tsv ->
+                        "${meta.alias},${meta.alias}/variants/${meta.alias}.nf_sv.vcf.gz\n${meta.alias},${meta.alias}/variants/${meta.alias}.nf_sv.vcf.gz.tbi"
+                    }
+                )
+            }
+
+            if (params.analysis_mode == 'both') {
+                ch_igv_lines = ch_igv_lines.mix(
+                    denovo_align_to_reference.out.sample_dir.map { meta, dir ->
+                        "${meta.alias},${meta.alias}/denovo/${meta.alias}.denovo_to_ref.bam\n${meta.alias},${meta.alias}/denovo/${meta.alias}.denovo_to_ref.bam.bai"
+                    }
+                )
+            }
+        } else if (params.analysis_mode == 'denovo') {
+            ch_all_consensus = denovo_final_align_and_qc.out.results
+                .map { meta, dir, consensus -> consensus }
+                .collect()
+            combine_denovo_consensus(ch_all_consensus)
+            ch_igv_lines = ch_igv_lines.mix(
+                Channel.of("reference/all-consensus-seqs.fasta\nreference/all-consensus-seqs.fasta.fai")
+            )
+            ch_igv_lines = ch_igv_lines.mix(
+                denovo_final_align_and_qc.out.results.map { meta, dir, consensus ->
+                    "${meta.alias},${meta.alias}/denovo/aligned.bam\n${meta.alias},${meta.alias}/denovo/aligned.bam.bai"
+                }
+            )
+        }
+
+        ch_fofn = ch_igv_lines.collectFile(name: 'igv_files.txt', newLine: true)
+        configure_igv(ch_fofn)
     }
 }
 
@@ -310,6 +390,7 @@ process build_reference {
     label 'wfamplicon'
     cpus 2
     memory '2 GB'
+    publishDir "${params.out_dir}/reference", mode: 'copy', pattern: 'reference.fa*'
     input:
         path reference
     output:
@@ -437,48 +518,6 @@ process porechop_trim {
     """
 }
 
-process dorado_trim {
-    label 'wf_basecalling'
-    cpus 4
-    memory '4 GB'
-    input:
-        tuple val(meta), path(reads), path(report_data, stageAs: 'report_data')
-    output:
-        tuple val(meta), path('trimmed.fastq.gz'), path('report_data')
-    script:
-    """
-    dorado --version > dorado-version.txt
-    if ! dorado trim ${params.trimmer_extra_args ?: ''} --emit-fastq '$reads' \
-        > trimmed.fastq 2>dorado-trim.log; then
-        cat dorado-trim.log >&2
-        echo 'The selected Dorado container could not trim this FASTQ input. Check its Dorado version/options, or choose porechop or none.' >&2
-        exit 2
-    fi
-    bgzip -@ $task.cpus trimmed.fastq
-    mv dorado-version.txt report_data/
-    """
-}
-
-process post_trim_stats {
-    label 'wfamplicon'
-    cpus 1
-    memory '2 GB'
-    input:
-        tuple val(meta), path(reads), path(report_data, stageAs: 'preprocess_data')
-    output:
-        tuple val(meta), path('trimmed.fastq.gz'), path('report_data'), env(N_READS)
-    script:
-    """
-    mkdir -p report_data
-    cp -a preprocess_data/. report_data/
-    fastcat -f report_data/post-trim-per-file-stats.tsv \
-        -i report_data/post-trim-runids.tsv -l report_data/post-trim-basecallers.tsv \
-        '$reads' > /dev/null
-    N_READS=\$(zcat '$reads' | awk 'NR % 4 == 1 { n++ } END { print n+0 }')
-    export N_READS
-    """
-}
-
 process no_trim {
     label 'wfamplicon'
     cpus 1
@@ -573,7 +612,6 @@ process software_versions {
         echo "samtools,\$(samtools --version | head -n 1 | awk '{print \$2}')"
         echo "fastcat,\$(fastcat --version 2>&1 | head -n 1)"
         if command -v porechop >/dev/null 2>&1; then echo "porechop,\$(porechop --version 2>&1 | head -n 1)"; fi
-        if command -v dorado >/dev/null 2>&1; then echo "dorado,\$(dorado --version 2>&1 | head -n 1)"; fi
         echo "sniffles,2.6.3"
         echo "cuban,0.1.0"
         echo "miniasm,0.3-r179"
@@ -800,6 +838,7 @@ process call_sniffles {
         --vcf raw_sv.vcf.gz \\
         --reference '$reference' \\
         --minsvlen ${params.min_sv_length} \\
+        --min-alignment-length ${params.min_alignment_length} \\
         --threads $task.cpus \\
         $phase_arg \\
         $extra
@@ -897,7 +936,7 @@ process plot_cuban {
             --sample '${meta.alias}:$bam' \\
             --tech '${meta.alias}:lr' \\
             --baseline-cov "${meta.alias}:\$cov" \\
-            --ref '$reference' \\
+            --max-reads ${params.cuban_max_reads} \\
             --outdir '${meta.alias}/sv_plots' \\
             --window ${params.cuban_window} \\
             $padding_arg \\
@@ -1177,7 +1216,7 @@ process denovo_align_to_reference {
         tuple val(meta), path(sample_dir), path(consensus), path(reference), path(target_bed)
     output:
         tuple val(meta), path("${sample_dir}"), emit: sample_dir
-        tuple val(meta), path("${meta.alias}.denovo_to_ref.paf"), path("${meta.alias}.dotplot.png"), emit: published_files
+        tuple val(meta), path("${meta.alias}.denovo_to_ref.paf"), path("${meta.alias}.dotplot.png"), path("${meta.alias}.denovo_to_ref.bam"), path("${meta.alias}.denovo_to_ref.bam.bai"), emit: published_files
     script:
     def has_target = params.target ? 'true' : 'false'
     """
@@ -1190,9 +1229,20 @@ process denovo_align_to_reference {
         ALIGN_REF='$reference'
     fi
 
-    minimap2 -x asm20 -c --eqx -t $task.cpus "\$ALIGN_REF" '$consensus' > '${meta.alias}.denovo_to_ref.paf'
-    workflow-glue dotplot --paf '${meta.alias}.denovo_to_ref.paf' --output-png '${meta.alias}.dotplot.png' --alias '${meta.alias}'
-    cp '${meta.alias}.denovo_to_ref.paf' '${meta.alias}.dotplot.png' '${sample_dir}/'
+    if [ -s '$consensus' ]; then
+        minimap2 -x asm20 -c --eqx -t $task.cpus "\$ALIGN_REF" '$consensus' > '${meta.alias}.denovo_to_ref.paf'
+        workflow-glue dotplot --paf '${meta.alias}.denovo_to_ref.paf' --output-png '${meta.alias}.dotplot.png' --alias '${meta.alias}'
+        cp '${meta.alias}.denovo_to_ref.paf' '${meta.alias}.dotplot.png' '${sample_dir}/'
+
+        minimap2 -ax asm20 -t $task.cpus "\$ALIGN_REF" '$consensus' \\
+            | samtools sort -@ $task.cpus -o '${meta.alias}.denovo_to_ref.bam' -
+        samtools index '${meta.alias}.denovo_to_ref.bam'
+    else
+        touch '${meta.alias}.denovo_to_ref.paf' '${meta.alias}.dotplot.png'
+        samtools view -H -b "\$ALIGN_REF" > '${meta.alias}.denovo_to_ref.bam' 2>/dev/null || samtools view -b /dev/null > '${meta.alias}.denovo_to_ref.bam'
+        samtools index '${meta.alias}.denovo_to_ref.bam' 2>/dev/null || touch '${meta.alias}.denovo_to_ref.bam.bai'
+        cp '${meta.alias}.denovo_to_ref.paf' '${meta.alias}.dotplot.png' '${sample_dir}/'
+    fi
     """
 }
 
@@ -1215,5 +1265,36 @@ process make_denovo_report {
         --versions '$versions' \\
         --params '$params_json' \\
         --wf-version '${workflow.manifest.version}'
+    """
+}
+
+process combine_denovo_consensus {
+    label 'wfamplicon'
+    cpus 1
+    memory '1 GB'
+    publishDir "${params.out_dir}/reference", mode: 'copy', pattern: 'all-consensus-seqs.fasta*'
+    input:
+        path consensus_fastas
+    output:
+        tuple path('all-consensus-seqs.fasta'), path('all-consensus-seqs.fasta.fai')
+    script:
+    """
+    cat $consensus_fastas > all-consensus-seqs.fasta
+    samtools faidx all-consensus-seqs.fasta
+    """
+}
+
+process configure_igv {
+    label 'wf_common'
+    cpus 1
+    memory '1 GB'
+    publishDir params.out_dir, mode: 'copy', pattern: 'igv.json'
+    input:
+        path fofn
+    output:
+        path 'igv.json'
+    script:
+    """
+    workflow-glue configure_igv --fofn '$fofn' > igv.json
     """
 }

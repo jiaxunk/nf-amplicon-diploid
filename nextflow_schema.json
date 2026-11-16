@@ -6,6 +6,63 @@
   "description": "Diploid ONT amplicon analysis: reference-based variant calling and de novo haplotype-aware assembly.",
   "type": "object",
   "definitions": {
+    "workflow_options": {
+      "title": "Workflow Options",
+      "type": "object",
+      "fa_icon": "fas fa-cogs",
+      "description": "High-level workflow behaviour and analysis mode selection.",
+      "properties": {
+        "analysis_mode": {
+          "type": "string",
+          "enum": [
+            "reference",
+            "denovo",
+            "both"
+          ],
+          "default": "reference",
+          "title": "Analysis mode",
+          "description": "Choose the analysis strategy for this run.",
+          "help_text": "`reference` \u2014 align reads to a reference FASTA and call variants (SNPs, SVs, phased consensus). `denovo` \u2014 perform haplotype-aware de novo assembly without a reference (reference FASTA is optional). `both` \u2014 run reference-based and de novo analyses in parallel (reference FASTA required)."
+        },
+        "out_dir": {
+          "type": "string",
+          "format": "directory-path",
+          "default": "output",
+          "title": "Output directory",
+          "description": "Directory where workflow results will be written.",
+          "help_text": "All output files, reports, and execution logs will be placed under this directory."
+        },
+        "force_remap": {
+          "type": "boolean",
+          "default": false,
+          "title": "Force remapping",
+          "description": "Remap already-aligned BAMs even when their headers match the reference.",
+          "help_text": "By default, BAM files whose headers indicate they were aligned to the supplied reference are passed directly to downstream steps. Enable this option to force FASTQ conversion and remapping regardless."
+        },
+        "combine_results": {
+          "type": "boolean",
+          "default": false,
+          "title": "Combine results",
+          "description": "Produce combined output files merging all samples.",
+          "help_text": "Reserved for future use. When enabled, an additional merged BAM and VCF will be published alongside per-sample outputs."
+        },
+        "igv": {
+          "type": "boolean",
+          "default": false,
+          "title": "IGV configuration",
+          "description": "Output an IGV session file for interactive visualisation.",
+          "help_text": "When enabled, a `igv.json` session file is published to the output directory, allowing results to be loaded directly into the Integrative Genomics Viewer."
+        },
+        "store_dir": {
+          "type": "string",
+          "format": "directory-path",
+          "title": "Store directory",
+          "description": "Directory for caching intermediate workflow data.",
+          "help_text": "Reserved for workflow-level caching of large reference indexes or downloaded models. Leave empty for normal runs.",
+          "hidden": true
+        }
+      }
+    },
     "input_options": {
       "title": "Input Options",
       "type": "object",
@@ -68,60 +125,24 @@
         }
       ]
     },
-    "workflow_options": {
-      "title": "Workflow Options",
+    "sample_options": {
+      "title": "Sample Options",
       "type": "object",
-      "fa_icon": "fas fa-cogs",
-      "description": "High-level workflow behaviour and analysis mode selection.",
+      "fa_icon": "fas fa-vials",
+      "description": "Parameters that relate to samples such as sample sheets and sample names.",
       "properties": {
-        "analysis_mode": {
+        "sample_sheet": {
           "type": "string",
-          "enum": [
-            "reference",
-            "denovo",
-            "both"
-          ],
-          "default": "reference",
-          "title": "Analysis mode",
-          "description": "Choose the analysis strategy for this run.",
-          "help_text": "`reference` \u2014 align reads to a reference FASTA and call variants (SNPs, SVs, phased consensus). `denovo` \u2014 perform haplotype-aware de novo assembly without a reference (reference FASTA is optional). `both` \u2014 run reference-based and de novo analyses in parallel (reference FASTA required)."
+          "format": "file-path",
+          "title": "Sample sheet",
+          "description": "A CSV file used to map barcodes to sample aliases.",
+          "help_text": "The sample sheet is a CSV file with, minimally, columns named `barcode` and `alias`. Extra columns are allowed. Provide when the input data is a barcoded directory tree."
         },
-        "out_dir": {
+        "sample": {
           "type": "string",
-          "format": "directory-path",
-          "default": "output",
-          "title": "Output directory",
-          "description": "Directory where workflow results will be written.",
-          "help_text": "All output files, reports, and execution logs will be placed under this directory."
-        },
-        "force_remap": {
-          "type": "boolean",
-          "default": false,
-          "title": "Force remapping",
-          "description": "Remap already-aligned BAMs even when their headers match the reference.",
-          "help_text": "By default, BAM files whose headers indicate they were aligned to the supplied reference are passed directly to downstream steps. Enable this option to force FASTQ conversion and remapping regardless."
-        },
-        "combine_results": {
-          "type": "boolean",
-          "default": false,
-          "title": "Combine results",
-          "description": "Produce combined output files merging all samples.",
-          "help_text": "Reserved for future use. When enabled, an additional merged BAM and VCF will be published alongside per-sample outputs."
-        },
-        "igv": {
-          "type": "boolean",
-          "default": false,
-          "title": "IGV configuration",
-          "description": "Output an IGV session file for interactive visualisation.",
-          "help_text": "When enabled, a `igv.json` session file is published to the output directory, allowing results to be loaded directly into the Integrative Genomics Viewer."
-        },
-        "store_dir": {
-          "type": "string",
-          "format": "directory-path",
-          "title": "Store directory",
-          "description": "Directory for caching intermediate workflow data.",
-          "help_text": "Reserved for workflow-level caching of large reference indexes or downloaded models. Leave empty for normal runs.",
-          "hidden": true
+          "title": "Sample name",
+          "description": "A single sample name for non-multiplexed data.",
+          "help_text": "Permissible when passing a single FASTQ/BAM file or a directory of such files. Not used when a sample sheet is provided."
         }
       }
     },
@@ -181,13 +202,12 @@
           "type": "string",
           "enum": [
             "porechop",
-            "dorado",
             "none"
           ],
           "default": "porechop",
           "title": "Trimmer",
           "description": "Adapter and barcode trimming method applied before alignment.",
-          "help_text": "`porechop` \u2014 trim adapters and barcodes with Porechop (recommended for most ONT libraries). `dorado` \u2014 use Dorado's built-in adapter trimmer. `none` \u2014 skip trimming entirely."
+          "help_text": "`porechop` \u2014 trim adapters and barcodes with Porechop (recommended for most ONT libraries). `none` \u2014 skip trimming entirely."
         },
         "trimmer_extra_args": {
           "type": "string",
@@ -357,6 +377,22 @@
           "title": "CUBAN extra arguments",
           "description": "Additional arguments passed to CUBAN.",
           "help_text": "These arguments are appended verbatim to the CUBAN command."
+        },
+        "min_alignment_length": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 0,
+          "title": "Minimum alignment length for SV calling",
+          "description": "Minimum length of aligned read segment required for structural variant calling in Sniffles.",
+          "help_text": "Passed to Sniffles as --min-alignment-length."
+        },
+        "cuban_max_reads": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "title": "Maximum reads plotted per Cuban SV panel",
+          "description": "Maximum number of supporting/spanning reads rendered in Cuban breakpoint evidence plots.",
+          "help_text": "Passed to CUBAN as --max-reads."
         }
       }
     },
@@ -483,27 +519,6 @@
           "title": "Monochrome logs",
           "description": "Disable colour in log output.",
           "hidden": true
-        }
-      }
-    },
-    "sample_options": {
-      "title": "Sample Options",
-      "type": "object",
-      "fa_icon": "fas fa-vials",
-      "description": "Parameters that relate to samples such as sample sheets and sample names.",
-      "properties": {
-        "sample_sheet": {
-          "type": "string",
-          "format": "file-path",
-          "title": "Sample sheet",
-          "description": "A CSV file used to map barcodes to sample aliases.",
-          "help_text": "The sample sheet is a CSV file with, minimally, columns named `barcode` and `alias`. Extra columns are allowed. Provide when the input data is a barcoded directory tree."
-        },
-        "sample": {
-          "type": "string",
-          "title": "Sample name",
-          "description": "A single sample name for non-multiplexed data.",
-          "help_text": "Permissible when passing a single FASTQ/BAM file or a directory of such files. Not used when a sample sheet is provided."
         }
       }
     }
