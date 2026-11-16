@@ -1,4 +1,5 @@
 """Tests for trim_and_qc multi-contig retention and quality control."""
+from __future__ import annotations
 from pathlib import Path
 import subprocess
 import pysam
