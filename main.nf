@@ -358,14 +358,6 @@ workflow {
                     }
                 )
             }
-
-            if (params.analysis_mode == 'both') {
-                ch_igv_lines = ch_igv_lines.mix(
-                    denovo_align_to_reference.out.sample_dir.map { meta, dir ->
-                        "${meta.alias},${meta.alias}/denovo/${meta.alias}.denovo_to_ref.bam\n${meta.alias},${meta.alias}/denovo/${meta.alias}.denovo_to_ref.bam.bai"
-                    }
-                )
-            }
         } else if (params.analysis_mode == 'denovo') {
             ch_all_consensus = denovo_final_align_and_qc.out.results
                 .map { meta, dir, consensus -> consensus }
@@ -1236,12 +1228,12 @@ process denovo_align_to_reference {
         workflow-glue dotplot --paf '${meta.alias}.denovo_to_ref.paf' --output-png '${meta.alias}.dotplot.png' --alias '${meta.alias}'
         cp '${meta.alias}.denovo_to_ref.paf' '${meta.alias}.dotplot.png' '${sample_dir}/'
 
-        minimap2 -ax asm20 -t $task.cpus "\$ALIGN_REF" '$consensus' \\
+        minimap2 -ax asm20 -t $task.cpus '$reference' '$consensus' \\
             | samtools sort -@ $task.cpus -o '${meta.alias}.denovo_to_ref.bam' -
         samtools index '${meta.alias}.denovo_to_ref.bam'
     else
         touch '${meta.alias}.denovo_to_ref.paf' '${meta.alias}.dotplot.png'
-        samtools view -H -b "\$ALIGN_REF" > '${meta.alias}.denovo_to_ref.bam' 2>/dev/null || samtools view -b /dev/null > '${meta.alias}.denovo_to_ref.bam'
+        samtools view -H -b '$reference' > '${meta.alias}.denovo_to_ref.bam' 2>/dev/null || samtools view -b /dev/null > '${meta.alias}.denovo_to_ref.bam'
         samtools index '${meta.alias}.denovo_to_ref.bam' 2>/dev/null || touch '${meta.alias}.denovo_to_ref.bam.bai'
         cp '${meta.alias}.denovo_to_ref.paf' '${meta.alias}.dotplot.png' '${sample_dir}/'
     fi
