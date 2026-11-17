@@ -11,6 +11,8 @@ def resolveDemoPath(pathStr) {
     if (!pathStr) return pathStr
     def f = file(pathStr)
     if (f.exists()) return pathStr
+    def inProject = file("${projectDir}/${pathStr}")
+    if (inProject.exists()) return inProject.toString()
     if (pathStr.startsWith('nf-amplicon-diploid-demo/')) {
         def fallback = file("${projectDir}/test_data/${pathStr.replaceFirst('^nf-amplicon-diploid-demo/', '')}")
         if (fallback.exists()) return fallback.toString()

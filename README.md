@@ -16,7 +16,7 @@ An Oxford Nanopore EPI2ME-compatible Nextflow workflow for targeted diploid ampl
   - `nf-amplicon-sv-report.html`: Structural variant classifications (DEL, INS, DUP, INV, BND), size profiles, and Cuban breakpoint evidence plots.
   - `nf-amplicon-denovo-report.html`: Assembly contig statistics, read-to-contig alignments, and interactive/static PAF dot plots.
 - **Interactive IGV Session Generation (`--igv`)**: Generates top-level `igv.json` configured for multi-track visual inspection across reference, de novo, and both modes.
-- **EPI2ME Desktop Ready**: Fully compliant schema with top-down visual ordering, bundled demo data for one-click **"Run demo analysis"**, and air-gapped `.2me` package export support.
+- **EPI2ME Desktop Ready**: Fully compliant schema with top-down visual ordering and bundled demo data for one-click **"Run demo analysis"**.
 
 ---
 
@@ -157,18 +157,6 @@ output/
         ├── <alias>.denovo_to_ref.bam  # De novo consensus aligned to reference (both mode)
         ├── dotplots/                  # PAF dot plots (interactive HTML & static PNG)
         └── phases/                    # Phased hap1 / hap2 consensus contigs
-```
-
----
-
-## Packaging as Standalone `.2me` Bundle
-
-For offline or air-gapped deployment in EPI2ME Desktop:
-
-```bash
-python3 bin/build_2me_package.py \
-  --workflow-dir . \
-  --output ./nf-amplicon-diploid-v1.0.0.2me
 ```
 
 ---

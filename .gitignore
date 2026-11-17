@@ -24,7 +24,16 @@ docs/agents/
 ideation.txt
 .system_generated/
 
-# Large local benchmark data
+# Demo archives
+*.tar.gz
+
+# Large local benchmark and internal development test data
 example/
-test_data/
+test_data/diploid_amplicon/
+test_data/fastq-denovo*/
+test_data/fastq-no*/
+test_data/fastq-single-read/
+test_data/ref with (parens) and spaces.fa
+test_data/sample_sheet_numeric.csv
+
 
