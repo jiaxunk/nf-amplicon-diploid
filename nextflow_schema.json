@@ -4,6 +4,8 @@
   "title": "nf-amplicon-diploid",
   "workflow_title": "Diploid Amplicon",
   "description": "Diploid ONT amplicon analysis: reference-based variant calling and de novo haplotype-aware assembly.",
+  "url": "https://github.com/jiaxunk/nf-amplicon-diploid",
+  "demo_url": "https://raw.githubusercontent.com/jiaxunk/nf-amplicon-diploid/main/demo.tar.gz",
   "type": "object",
   "definitions": {
     "workflow_options": {
